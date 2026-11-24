@@ -110,3 +110,34 @@ describe("app", () => {
     expect(Math.abs(drift) / s.energy).toBeLessThan(1e-5);
   });
 });
+
+describe("touch", () => {
+  it("a tap places a source and a second tap on it with the erase tool removes it", async () => {
+    const browser = H.page.context().browser()!;
+    const ctx = await browser.newContext({ hasTouch: true, isMobile: false, viewport: { width: 700, height: 500 } });
+    const page = await ctx.newPage();
+    await page.goto(H.url + "/index.html?n=16");
+    await page.waitForFunction(() => document.body.dataset.state === "running", null, { timeout: 90_000 });
+    const count = () => page.evaluate(() => window.tayutauApp!.state.sources.length);
+    const n0 = await count();
+    await page.tap('button[data-tool="cold"]');
+    const p = await page.evaluate(() => {
+      const a = window.tayutauApp!;
+      const q = a.state.params;
+      return a.screenOf(q.nx * q.h * 0.6, 0, q.nz * q.h * 0.4);
+    });
+    await page.touchscreen.tap(p.x, p.y);
+    expect(await count()).toBe(n0 + 1);
+    const T = await page.evaluate(() => window.tayutauApp!.state.sources.at(-1)!.T);
+    expect(T).toBeLessThan(0);
+    await page.tap('button[data-tool="erase"]');
+    const q = await page.evaluate(() => {
+      const a = window.tayutauApp!;
+      const s = a.state.sources.at(-1)!;
+      return a.screenOf(s.x, s.y, s.z);
+    });
+    await page.touchscreen.tap(q.x, q.y);
+    expect(await count()).toBe(n0);
+    await ctx.close();
+  });
+});

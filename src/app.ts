@@ -58,7 +58,9 @@ declare global {
 
 export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement): Promise<App> {
   const url = new URLSearchParams(location.search);
-  const n = Math.min(96, Math.max(16, Number(url.get("n")) || 48));
+  // phones / tablets get a coarser default grid (the whole step runs on their GPU every frame)
+  const coarse = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+  const n = Math.min(96, Math.max(16, Number(url.get("n")) || (coarse ? 32 : 48)));
   const params = defaultParams(n);
 
   const scene = new Scene(engine);
@@ -209,6 +211,17 @@ export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement):
     }
   });
 
+  engine.onContextLostObservable.add(() => {
+    // simulation state lives only on the GPU; it cannot be restored after a device loss
+    engine.stopRenderLoop();
+    const box = document.getElementById("unsupported");
+    if (box) {
+      document.getElementById("unsupported-reason")!.textContent = "GPU がリセットされたため、シミュレーションを続けられません。ページを再読み込みしてください。";
+      box.querySelector("h1")!.textContent = "GPU が停止しました";
+      box.hidden = false;
+      document.body.dataset.state = "lost";
+    }
+  });
   engine.runRenderLoop(() => scene.render());
   window.addEventListener("resize", () => engine.resize());
   return app;
