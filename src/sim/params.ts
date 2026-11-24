@@ -37,8 +37,9 @@ export interface SimParams {
   rho0: number;
   /**
    * [GAME] heat-transfer coefficient between a heat source and the water cells inside it [W/(m^2 K)].
-   * Real values span ~1e2 (natural convection) to ~1e4+ (boiling); chosen so a small heater
-   * visibly boils water within seconds.
+   * Real values span ~1e2–1e3 (natural convection) to ~1e4–1e5 (nucleate boiling) (order of magnitude,
+   * textbook ranges; exact values 未確認). 1.5e4 lets a 400 °C heater boil water locally within a second
+   * (checked on the GPU at 32^3: the default heater delivers ~1.6 kW into the 0.125 kg tank).
    */
   hc: number;
   /**
@@ -84,7 +85,7 @@ export function defaultParams(n = 48): SimParams {
     g: 9.81,
     rhoRef: rhoLiquid(20),
     rho0: 1000,
-    hc: 3000,
+    hc: 15000,
     kScale: 10,
     bubbleRise: 0.12,
     vaporBuoyancyScale: 0.05,

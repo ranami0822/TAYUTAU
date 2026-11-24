@@ -41,3 +41,10 @@ export const sum = (a: ArrayLike<number>) => {
 export function domainLength(p: SimParams) {
   return { Lx: p.nx * p.h, Ly: p.ny * p.h, Lz: p.nz * p.h };
 }
+
+/** Switch a solver's storage to Float64Array (to separate scheme conservation from f32 rounding). */
+export function toF64(s: CpuSolver) {
+  const o = s as unknown as Record<string, ArrayLike<number>>;
+  for (const k of ["H", "Htmp", "vel", "vel2", "phi", "div", "omega", "srcAcc"]) o[k] = Float64Array.from(o[k]);
+  return s;
+}

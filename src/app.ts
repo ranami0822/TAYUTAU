@@ -42,6 +42,8 @@ export interface App {
   volume: VolumeRenderer;
   scene: Scene;
   camera: ArcRotateCamera;
+  /** number of live bubble particles (reads the particle buffer back; for tests / debugging) */
+  countBubbles(): Promise<number>;
   /** CSS-pixel position of a domain point on the canvas (for tests and overlays) */
   screenOf(x: number, y: number, z: number): { x: number; y: number };
 }
@@ -131,6 +133,13 @@ export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement):
       if (i < 0 || i >= state.sources.length) return;
       Object.assign(state.sources[i], s);
       state.dirty = true;
+    },
+    async countBubbles() {
+      const v = (await bubbles.parts.read()) as Uint8Array;
+      const a = new Float32Array(v.buffer, v.byteOffset, bubbles.count * 8);
+      let n = 0;
+      for (let i = 0; i < bubbles.count; i++) if (a[i * 8 + 3] > 0.5) n++;
+      return n;
     },
     screenOf(x, y, z) {
       const eng = scene.getEngine();

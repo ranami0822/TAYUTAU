@@ -28,6 +28,14 @@ describe("app", () => {
     expect(H.errors.filter((e) => !e.includes("favicon"))).toEqual([]);
   });
 
+  it("boils next to the default 400 °C heater: vapour in the HUD totals and bubbles on screen", async () => {
+    await H.page.waitForFunction(() => (window.tayutauApp!.state.stats?.vaporMass ?? 0) > 0, null, { timeout: 150_000 });
+    const n = await H.page.evaluate(() => window.tayutauApp!.countBubbles());
+    expect(n).toBeGreaterThan(0);
+    const s = (await st()).stats!;
+    expect(s.maxT).toBeGreaterThanOrEqual(100);
+  });
+
   it("places a heat source where the user clicks on the tank", async () => {
     const before = await st();
     await H.page.click('button[data-tool="hot"]');
