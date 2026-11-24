@@ -19,7 +19,9 @@
 | `03-parallel-local-rc.md` | 並列／局所リザバー（Pathak ら 2018）と、部分観測での不安定性（Vlachas ら 2020） |
 | `04-hybrid-stabilization.md` | ハイブリッド予測と発散対策（射影・ノイズ学習・ナッジング・第2リザバー補正器の位置づけ） |
 | `05-verified-facts.md` | 設計メモの[未確認]事項の確認結果（Workers上限・Zig/WebGPU・Pathakコード） |
-| `06-survey.md` | 俯瞰調査（基礎〜物理リザバー〜2023–2026最新動向・最初に読むべき論文）※調査が届き次第追加 |
+| `06-survey.md` | 俯瞰調査（基礎〜物理リザバー〜2023–2026最新動向・最初に読むべき論文） |
+| `07-fluid-implementation-survey.md` | 設計メモ向け調査（格子法・Tait方程式・相変化・学習クロージャ・潜在予測・Babylon/WebGPU・データ生成） |
+| `08-implementation-roadmap.md` | 07から抜き出した設計判断と、ゲート付き実験順序 |
 
 ## 書き方の約束
 
