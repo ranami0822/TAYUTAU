@@ -4,6 +4,17 @@
  */
 import { ComputeShader, StorageBuffer, Constants, type WebGPUEngine } from "@babylonjs/core";
 import { checkWebGPU, createEngine } from "../src/gpu/engine";
+import { GpuSolver } from "../src/gpu/gpuSolver";
+import type { SimParams } from "../src/sim/params";
+
+export interface RunSimArgs {
+  params: SimParams;
+  H?: number[];
+  vel?: number[];
+  steps: number;
+  /** read back after these step counts (default: only at the end) */
+  readAt?: number[];
+}
 
 declare global {
   interface Window {
@@ -23,7 +34,34 @@ export function engine() {
   return enginePromise;
 }
 
+async function runSim(args: RunSimArgs) {
+  const eng = await engine();
+  const sim = new GpuSolver(eng, args.params);
+  if (args.H) sim.H.update(new Float32Array(args.H));
+  if (args.vel) sim.vel.update(new Float32Array(args.vel));
+  await sim.ready();
+  const { nCells, nFaces } = sim.g;
+  const snaps: { step: number; H: number[]; vel: number[]; srcAcc: number[] }[] = [];
+  const readAt = args.readAt ?? [args.steps];
+  const t0 = performance.now();
+  for (let n = 1; n <= args.steps; n++) {
+    sim.step();
+    if (readAt.includes(n)) {
+      snaps.push({
+        step: n,
+        H: Array.from(await sim.read(sim.H, nCells)),
+        vel: Array.from(await sim.read(sim.vel, nFaces)),
+        srcAcc: Array.from(await sim.read(sim.srcAcc, nCells)),
+      });
+    }
+  }
+  const ms = performance.now() - t0;
+  sim.dispose();
+  return { snaps, ms };
+}
+
 window.tayutau = {
+  runSim,
   /** stage 0: a compute shader writes out[i] = in[i] * 2 + 1 and the result is read back */
   async smoke(n: number) {
     const eng = await engine();
