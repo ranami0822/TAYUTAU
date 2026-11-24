@@ -143,7 +143,8 @@ export class CpuSolver {
     const h = p.h;
     const G = p.hc / (p.rho0 * h); // [J/(kg K s)]
     const condK = (dts * p.kScale) / (p.rho0 * h * h);
-    const cD = (p.bubbleRise * dts) / h;
+    // bubbles rise because of gravity: slip velocity scales with g (no drift in zero gravity)
+    const cD = (p.bubbleRise * Math.max(0, p.g / 9.81) * dts) / h;
     const nSrc = Math.min(p.sources.length, MAX_SOURCES);
     for (let k = 0; k < nz; k++)
       for (let j = 0; j < ny; j++)

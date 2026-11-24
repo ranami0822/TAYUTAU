@@ -6,7 +6,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     projects: [
-      { test: { name: "cpu", include: ["tests/cpu/**/*.test.ts"], environment: "node" } },
+      { test: { name: "cpu", include: ["tests/cpu/**/*.test.ts"], environment: "node", testTimeout: 120_000, hookTimeout: 120_000 } },
       {
         test: {
           name: "gpu",

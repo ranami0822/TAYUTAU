@@ -49,6 +49,7 @@ export interface SimParams {
   /**
    * [GAME] slip (rise) velocity of vapour relative to the liquid [m/s]. Real mm-sized bubbles rise at
    * roughly 0.2–0.3 m/s (未確認: order of magnitude only); reduced for CFL stability.
+   * Applied as bubbleRise * g / 9.81 (the slip is driven by gravity).
    */
   bubbleRise: number;
   /**

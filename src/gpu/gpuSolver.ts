@@ -3,12 +3,26 @@
  * Field data stays on the GPU; the renderer binds `H` and `vel` directly.
  */
 import { ComputeShader, Constants, StorageBuffer, type WebGPUEngine } from "@babylonjs/core";
-import { KERNELS, kernelSource, bindingsMapping, dispatchSize, type KernelDef } from "./kernels";
+import { KERNELS, kernelSource, bindingsMapping, dispatchSize, REDUCE_WG, type KernelDef } from "./kernels";
 import { packParams, PARAM_WORDS, type SimParams } from "../sim/params";
 import { makeGrid, type Grid } from "../sim/cpuSolver";
 import { enthalpyFromT } from "../sim/water";
 
 const RW = Constants.BUFFER_CREATIONFLAG_READWRITE;
+
+export interface SimStats {
+  time: number;
+  /** total enthalpy [J] (relative to ice at 0 °C) */
+  energy: number;
+  /** energy added by heat sources since reset [J] (negative = removed) */
+  injected: number;
+  iceMass: number;
+  vaporMass: number;
+  totalMass: number;
+  meanT: number;
+  maxT: number;
+  minT: number;
+}
 
 export class GpuSolver {
   readonly engine: WebGPUEngine;
@@ -23,6 +37,8 @@ export class GpuSolver {
   readonly div: StorageBuffer;
   readonly omega: StorageBuffer;
   readonly srcAcc: StorageBuffer;
+  readonly partials: StorageBuffer;
+  readonly nGroups: number;
   private shaders: Record<string, ComputeShader> = {};
   time = 0;
 
@@ -42,6 +58,8 @@ export class GpuSolver {
     this.div = buf(nC, "div");
     this.omega = buf(nC * 4, "omega");
     this.srcAcc = buf(nC, "srcAcc");
+    this.nGroups = Math.ceil(nC / REDUCE_WG);
+    this.partials = buf(this.nGroups * 8, "partials");
     this.setParams(p);
     this.H.update(new Float32Array(nC).fill(enthalpyFromT(initialT)));
     this.reset(initialT);
@@ -63,6 +81,7 @@ export class GpuSolver {
     this.make(KERNELS.divergence, { vin: this.vel2, div: this.div });
     this.make(KERNELS.pressureRed, B);
     this.make(KERNELS.pressureBlack, B);
+    this.make(KERNELS.reduce, { Hs: this.H, srcAcc: this.srcAcc, partials: this.partials });
     this.make(KERNELS.project, { vin: this.vel2, phi: this.phi, Hs: this.H, vout: this.vel });
   }
 
@@ -134,12 +153,39 @@ export class GpuSolver {
     this.time += this.p.dt;
   }
 
+  /** Totals over the domain, reduced on the GPU (only nGroups*8 floats are read back). */
+  async stats(): Promise<SimStats> {
+    const g = this.nGroups;
+    if (g > 65535) throw new Error("grid too large for 1D reduce dispatch");
+    if (!this.shaders.reduce.dispatch(g, 1, 1)) throw new Error("dispatch failed: reduce");
+    const a = await this.read(this.partials, g * 8);
+    let sH = 0, sSrc = 0, sIce = 0, sVap = 0, sT = 0, maxT = -Infinity, minT = Infinity;
+    for (let q = 0; q < g; q++) {
+      const o = q * 8;
+      sH += a[o]; sSrc += a[o + 1]; sIce += a[o + 2]; sVap += a[o + 3];
+      maxT = Math.max(maxT, a[o + 4]); minT = Math.min(minT, a[o + 5]); sT += a[o + 6];
+    }
+    const n = this.g.nCells;
+    const m = this.p.rho0 * this.p.h ** 3;
+    return {
+      time: this.time,
+      energy: sH * m,
+      injected: sSrc * m,
+      iceMass: sIce * m,
+      vaporMass: sVap * m,
+      totalMass: n * m,
+      meanT: sT / n,
+      maxT,
+      minT,
+    };
+  }
+
   async read(b: StorageBuffer, n: number): Promise<Float32Array> {
     const v = (await b.read(0, n * 4)) as Uint8Array;
     return new Float32Array(v.buffer.slice(v.byteOffset, v.byteOffset + n * 4));
   }
 
   dispose() {
-    for (const b of [this.P, this.H, this.Htmp, this.vel, this.vel2, this.phi, this.div, this.omega, this.srcAcc]) b.dispose();
+    for (const b of [this.P, this.H, this.Htmp, this.vel, this.vel2, this.phi, this.div, this.omega, this.srcAcc, this.partials]) b.dispose();
   }
 }

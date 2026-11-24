@@ -8,6 +8,7 @@
 import * as W from "../sim/water";
 
 export const WG = 64;
+export const REDUCE_WG = 256;
 
 export interface KernelDef {
   name: string;
@@ -203,7 +204,7 @@ ${CELL_HEAD}
   let dts = DT() / SUBC();
   let G = HC() / (RHO0() * h);
   let condK = dts * KSCALE() / (RHO0() * h * h);
-  let cD = BRISE() * dts / h;
+  let cD = BRISE() * max(0.0, GRAV() / 9.81) * dts / h;
   let Hc = Hs[c];
   let Tc = temperature(Hc);
   // heat sources
@@ -390,6 +391,131 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 ${CELL_HEAD}
   div[c] = (vin[uIdx(i + 1, j, k)] - vin[uIdx(i, j, k)] + vin[vIdx(i, j + 1, k)] - vin[vIdx(i, j, k)]
           + vin[wIdx(i, j, k + 1)] - vin[wIdx(i, j, k)]) / HH();
+}`,
+  },
+
+  /**
+   * Per-workgroup partial sums for the HUD and for conservation checks:
+   * [sum H, sum srcAcc, sum ice fraction, sum vapour quality, max T, min T, sum T, 0] per group of REDUCE_WG cells.
+   */
+  reduce: {
+    name: "reduce",
+    domain: "cells",
+    bindings: [
+      { name: "Hs", access: "read" },
+      { name: "srcAcc", access: "read" },
+      { name: "partials", access: "read_write" },
+    ],
+    body: /* wgsl */ `
+var<workgroup> sh : array<array<f32, 7>, ${REDUCE_WG}>;
+@compute @workgroup_size(${REDUCE_WG})
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(local_invocation_id) lid : vec3<u32>,
+        @builtin(workgroup_id) wid : vec3<u32>) {
+  let c = i32(gid.x);
+  let l = lid.x;
+  var v = array<f32, 7>(0.0, 0.0, 0.0, 0.0, -1e30, 1e30, 0.0);
+  if (c < ncells()) {
+    let H = Hs[c];
+    let T = temperature(H);
+    v = array<f32, 7>(H, srcAcc[c], iceFraction(H), vaporQuality(H), T, T, T);
+  }
+  sh[l] = v;
+  workgroupBarrier();
+  for (var s = ${REDUCE_WG / 2}u; s > 0u; s = s >> 1u) {
+    if (l < s) {
+      let a = sh[l]; let b = sh[l + s];
+      sh[l] = array<f32, 7>(a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], max(a[4], b[4]), min(a[5], b[5]), a[6] + b[6]);
+    }
+    workgroupBarrier();
+  }
+  if (l == 0u) {
+    let o = i32(wid.x) * 8;
+    let r = sh[0];
+    for (var q = 0; q < 7; q++) { partials[o + q] = r[q]; }
+    partials[o + 7] = 0.0;
+  }
+}`,
+  },
+
+  /**
+   * Visual bubble particles (no mass, no energy: purely a display of where the physics boils).
+   * parts: 8 floats per particle [x, y, z (metres), alive, size, age, seed, 0].
+   * BP: [frame, simulated seconds this frame, spawn tries per particle, max size (m)].
+   * Spawn: in cells whose vapour quality is between 0 and 1 (boiling) or on the surface of a
+   * heat source hotter than 100 °C where the water has reached 100 °C.
+   * Motion: fluid velocity + slip rise velocity; shrink and vanish in subcooled water (condensation),
+   * vanish at the top of the liquid column or on ice.
+   */
+  bubbles: {
+    name: "bubbles",
+    domain: "cells",
+    bindings: [
+      { name: "Hs", access: "read" },
+      { name: "vin", access: "read" },
+      { name: "BP", access: "read" },
+      { name: "parts", access: "read_write" },
+    ],
+    body: SAMPLE + /* wgsl */ `
+fn hash(x0 : u32) -> u32 {
+  var x = x0;
+  x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
+  return x;
+}
+fn rnd(s : ptr<function, u32>) -> f32 { *s = hash(*s); return f32(*s >> 8u) / 16777216.0; }
+fn cellAt(p : vec3f) -> i32 {
+  let g = vec3<i32>(floor(p / HH()));
+  return cidxc(g.x, g.y, g.z);
+}
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let id = i32(gid.x);
+  let nP = i32(arrayLength(&parts)) / 8;
+  if (id >= nP) { return; }
+  let o = id * 8;
+  var seed = hash(u32(id) * 9781u + u32(BP[0]) * 6271u + 17u);
+  let dtf = BP[1];
+  let h = HH();
+  let L = vec3f(f32(NX()), f32(NY()), f32(NZ())) * h;
+  var pos = vec3f(parts[o], parts[o + 1], parts[o + 2]);
+  var alive = parts[o + 3];
+  var size = parts[o + 4];
+  var age = parts[o + 5];
+  if (alive < 0.5) {
+    let tries = i32(BP[2]);
+    for (var t = 0; t < tries; t++) {
+      var cand = vec3f(rnd(&seed), rnd(&seed), rnd(&seed)) * L;
+      // half of the tries sample the surface of a hot source (where boiling starts)
+      if ((t & 1) == 1 && NSRC() > 0) {
+        let s = min(i32(rnd(&seed) * f32(NSRC())), NSRC() - 1);
+        let so = 32 + s * 8;
+        if (P[so + 4] > 100.0) {
+          let u = rnd(&seed) * 2.0 - 1.0; let ph = rnd(&seed) * 6.2831853;
+          let dir = vec3f(sqrt(1.0 - u * u) * cos(ph), u, sqrt(1.0 - u * u) * sin(ph));
+          cand = vec3f(P[so], P[so + 1], P[so + 2]) + dir * (P[so + 3] + 0.5 * h);
+        }
+      }
+      if (any(cand < vec3f(0.0)) || any(cand >= L)) { continue; }
+      let H = Hs[cellAt(cand)];
+      if (H > H_B && H < H_VSAT) {
+        pos = cand; alive = 1.0; size = 0.15 * BP[3]; age = 0.0;
+        break;
+      }
+    }
+  } else {
+    let g = pos / h;
+    let v = vec3f(sampleComp(0, g.x, g.y, g.z), sampleComp(1, g.x, g.y, g.z), sampleComp(2, g.x, g.y, g.z));
+    let wob = vec3f(rnd(&seed) - 0.5, 0.0, rnd(&seed) - 0.5) * 0.02;
+    pos += (v + vec3f(0.0, BRISE() * 1.5, 0.0) + wob) * dtf;
+    age += dtf;
+    let H = Hs[cellAt(clamp(pos, vec3f(0.0), L - vec3f(1e-6)))];
+    let chi = vaporQuality(H);
+    if (H > H_B) { size = min(BP[3], size + dtf * BP[3] * (0.8 + 4.0 * chi)); }
+    else { size -= dtf * BP[3] * (0.6 + 0.08 * (100.0 - temperature(H))); }
+    if (pos.y >= L.y - 0.5 * h || isSolidH(H) || size <= 0.02 * BP[3] || age > 8.0 || chi >= 0.999) { alive = 0.0; }
+    pos = clamp(pos, vec3f(0.0), L);
+  }
+  parts[o] = pos.x; parts[o + 1] = pos.y; parts[o + 2] = pos.z;
+  parts[o + 3] = alive; parts[o + 4] = size; parts[o + 5] = age;
 }`,
   },
 
