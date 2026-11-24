@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+__pycache__/
+.pytest_cache/
+test-results/
+reservoir-py/data/

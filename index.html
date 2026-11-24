@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>TAYUTAU — 3D 流体シミュレータ</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <canvas id="view" touch-action="none"></canvas>
+    <div id="unsupported" hidden>
+      <h1>WebGPU が必要です</h1>
+      <p id="unsupported-reason"></p>
+      <p>
+        Chrome / Edge 113 以降（デスクトップ）、または WebGPU を有効にしたブラウザで開いてください。
+        このシミュレータは計算をすべて GPU のコンピュートシェーダーで行うため、WebGL での代替表示はありません。
+      </p>
+    </div>
+    <div id="ui"></div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

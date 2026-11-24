@@ -1,0 +1,27 @@
+{
+  "name": "tayutau",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "3D fluid simulator with heating, boiling and freezing (Babylon.js + WebGPU)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:cpu": "vitest run --project cpu",
+    "test:gpu": "vitest run --project gpu",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^9.37.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@webgpu/types": "^0.1.74",
+    "playwright": "^1.63.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  }
+}
