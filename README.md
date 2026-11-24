@@ -23,6 +23,14 @@ npm run build      # dist/ に静的ファイルを出力（型チェック込�
 npm run preview    # ビルド結果をローカルで確認
 ```
 
+公開版: https://tayutau.crami.workers.dev （Cloudflare Workers の静的アセット）
+
+デプロイ（`CLOUDFLARE_API_TOKEN` と `CLOUDFLARE_ACCOUNT_ID` が必要）:
+
+```sh
+npm run deploy     # ビルドして wrangler deploy（設定は wrangler.jsonc）
+```
+
 - WebGPU が使えないブラウザでは、その旨のメッセージを表示します（WebGL での代替表示はありません）。
 - 格子の細かさは URL で変えられます: `?n=32`（軽い）〜 `?n=64`（重い）。既定は 48³。
 
