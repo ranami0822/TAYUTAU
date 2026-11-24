@@ -17,7 +17,9 @@ export async function checkWebGPU(): Promise<WebGPUCheck> {
 }
 
 export async function createEngine(canvas: HTMLCanvasElement): Promise<WebGPUEngine> {
-  const engine = new WebGPUEngine(canvas, { antialias: true, adaptToDeviceRatio: true });
+  // render at CSS-pixel resolution: the volume ray-march is per pixel, so full Retina resolution would
+  // cost 4x for little gain (the UI is HTML and stays sharp). The quality menu changes this at runtime.
+  const engine = new WebGPUEngine(canvas, { antialias: true, adaptToDeviceRatio: false });
   await engine.initAsync();
   if (!engine.getCaps().supportComputeShaders) {
     engine.dispose();

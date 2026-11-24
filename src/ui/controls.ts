@@ -33,6 +33,10 @@ export function buildUI(app: App) {
       <button id="reset">リセット</button>
     </div>
     <div class="row"><label><input type="checkbox" id="tempView"> 温度を強調表示</label></div>
+    <div class="row">
+      <label for="quality" style="flex:0 0 auto">描画解像度</label>
+      <select id="quality"><option value="0.75">高</option><option value="1" selected>標準</option><option value="1.5">軽量</option><option value="2">最軽量</option></select>
+    </div>
   </div>
   <div class="hud" id="hud"></div>
   <div class="legend"><span>0 °C</span><div class="bar"></div><span>100 °C</span></div>`;
@@ -65,6 +69,9 @@ export function buildUI(app: App) {
   });
   q<HTMLSelectElement>("speed").addEventListener("change", (e) => (st.stepsPerFrame = Number((e.target as HTMLSelectElement).value)));
   q("reset").addEventListener("click", () => app.reset(q<HTMLSelectElement>("preset").value as Preset));
+  q<HTMLSelectElement>("quality").addEventListener("change", (e) =>
+    app.scene.getEngine().setHardwareScalingLevel(Number((e.target as HTMLSelectElement).value)),
+  );
   q<HTMLInputElement>("tempView").addEventListener("change", (e) => (st.viewMode = (e.target as HTMLInputElement).checked ? 1 : 0));
 
   function refresh() {
