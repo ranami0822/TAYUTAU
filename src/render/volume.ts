@@ -74,6 +74,9 @@ fn sampleH(g : vec3f) -> f32 {
   return mix(mix(c00, c10, t.y), mix(c01, c11, t.y), t.z);
 }
 
+/** normalised, clamped enthalpy used for ice normals: grows from ice to water */
+fn hn(g : vec3f) -> f32 { return clamp(sampleH(g), -0.6 * L_F, 1.6 * L_F) / L_F; }
+
 /** temperature colour map: deep blue (<=0) - cyan - clear (20) - yellow - orange - red (100) - white-hot */
 fn tempColor(T : f32) -> vec3f {
   if (T < 0.0) { return vec3f(0.35, 0.55, 1.0); }
@@ -126,7 +129,10 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   let stepLen = cellW * 0.75;
   var col = vec3f(0.0);
   var alpha = 0.0;
-  var t = tNear + stepLen * 0.5;
+  // per-pixel jitter of the first sample hides step banding
+  let fc = input.position.xy;
+  let jit = fract(sin(dot(fc, vec2f(12.9898, 78.233))) * 43758.5453);
+  var t = tNear + stepLen * jit;
   let tempMode = uniforms.viewMode > 0.5;
   var hitIce = false;
   loop {
@@ -136,12 +142,21 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     let H = sampleH(g);
     let fi = iceFraction(H);
     if (fi > 0.5) {
-      // ice surface: normal from the gradient of the ice fraction
-      let e = 0.75;
-      let gx = iceFraction(sampleH(g + vec3f(e, 0.0, 0.0))) - iceFraction(sampleH(g - vec3f(e, 0.0, 0.0)));
-      let gy = iceFraction(sampleH(g + vec3f(0.0, e, 0.0))) - iceFraction(sampleH(g - vec3f(0.0, e, 0.0)));
-      let gz = iceFraction(sampleH(g + vec3f(0.0, 0.0, e))) - iceFraction(sampleH(g - vec3f(0.0, 0.0, e)));
-      var n = -vec3f(gx, gy, gz);
+      // refine the iso-surface (ice fraction 0.5) between the previous and this sample
+      var lo = max(t - stepLen, tNear);
+      var hi = t;
+      for (var r = 0; r < 5; r++) {
+        let mid = 0.5 * (lo + hi);
+        if (iceFraction(sampleH((ro + rd * mid - uniforms.boxMin) * toGrid)) > 0.5) { hi = mid; } else { lo = mid; }
+      }
+      let g = (ro + rd * hi - uniforms.boxMin) * toGrid;
+      let H = sampleH(g);
+      // ice surface: normal from the gradient of a clamped enthalpy (smoother than the ice fraction itself)
+      let e = 1.0;
+      let gx = hn(g + vec3f(e, 0.0, 0.0)) - hn(g - vec3f(e, 0.0, 0.0));
+      let gy = hn(g + vec3f(0.0, e, 0.0)) - hn(g - vec3f(0.0, e, 0.0));
+      let gz = hn(g + vec3f(0.0, 0.0, e)) - hn(g - vec3f(0.0, 0.0, e));
+      var n = vec3f(gx, gy, gz);
       if (length(n) < 1e-4) { n = -rd; }
       n = normalize(n);
       let L = normalize(uniforms.lightDir);

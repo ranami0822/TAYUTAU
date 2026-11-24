@@ -108,6 +108,7 @@ export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement):
     steps: 0,
   };
 
+  let statsGen = 0;
   const app: App = {
     state,
     volume,
@@ -157,6 +158,7 @@ export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement):
       state.steps = 0;
       state.stats = null;
       state.stats0 = undefined;
+      statsGen++;
     },
   };
   window.tayutauApp = app;
@@ -185,9 +187,11 @@ export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement):
     if (!statsBusy && now - lastStats > 400) {
       statsBusy = true;
       lastStats = now;
+      const gen = statsGen;
       sim
         .stats()
         .then((s) => {
+          if (gen !== statsGen) return; // a reset happened while this was in flight
           if (state.stats0 === undefined) state.stats0 = s.energy - s.injected;
           state.stats = s;
           ui.showStats(s);
