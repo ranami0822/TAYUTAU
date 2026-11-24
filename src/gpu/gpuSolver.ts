@@ -4,7 +4,7 @@
  */
 import { ComputeShader, Constants, StorageBuffer, type WebGPUEngine } from "@babylonjs/core";
 import { KERNELS, kernelSource, bindingsMapping, dispatchSize, REDUCE_WG, type KernelDef } from "./kernels";
-import { packParams, PARAM_WORDS, type SimParams } from "../sim/params";
+import { packParams, PARAM_WORDS, waterRows, type SimParams } from "../sim/params";
 import { makeGrid, type Grid } from "../sim/cpuSolver";
 import { enthalpyFromT } from "../sim/water";
 
@@ -165,7 +165,7 @@ export class GpuSolver {
       sH += a[o]; sSrc += a[o + 1]; sIce += a[o + 2]; sVap += a[o + 3];
       maxT = Math.max(maxT, a[o + 4]); minT = Math.min(minT, a[o + 5]); sT += a[o + 6];
     }
-    const n = this.g.nCells;
+    const n = this.g.nx * waterRows(this.p) * this.g.nz; // water cells (air excluded by the kernel)
     const m = this.p.rho0 * this.p.h ** 3;
     return {
       time: this.time,

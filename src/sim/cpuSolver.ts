@@ -20,7 +20,7 @@
  *   pressure:    red-black SOR on phi (warm-started)
  *   project:     vel = vel2 - grad phi (open faces only), clamp
  */
-import { type SimParams, MAX_SOURCES } from "./params";
+import { type SimParams, MAX_SOURCES, waterRows } from "./params";
 import {
   temperature,
   enthalpyFromT,
@@ -110,10 +110,19 @@ export class CpuSolver {
   wIdx(i: number, j: number, k: number) {
     return this.g.oW + i + this.g.nx * (j + this.g.ny * k);
   }
-  /** solid (ice) test with out-of-domain counting as solid */
+  /** number of water rows: cells with j >= rows are air */
+  get rows() {
+    return waterRows(this.p);
+  }
+  /** air cell (above the water surface) */
+  isAir(j: number) {
+    return j >= this.rows;
+  }
+  /** blocked for flow: ice, air (the surface acts as a rigid lid) or out of the domain */
   solidAt(i: number, j: number, k: number, H = this.H) {
     const { nx, ny, nz } = this.g;
     if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) return true;
+    if (this.isAir(j)) return true;
     return isSolid(H[this.idx(i, j, k)]);
   }
 
@@ -146,11 +155,16 @@ export class CpuSolver {
     // bubbles rise because of gravity: slip velocity scales with g (no drift in zero gravity)
     const cD = (p.bubbleRise * Math.max(0, p.g / 9.81) * dts) / h;
     const nSrc = Math.min(p.sources.length, MAX_SOURCES);
+    const rows = this.rows;
     for (let k = 0; k < nz; k++)
       for (let j = 0; j < ny; j++)
         for (let i = 0; i < nx; i++) {
           const c = this.idx(i, j, k);
           const Hc = H[c];
+          if (j >= rows) {
+            out[c] = Hc; // air: holds no water, exchanges nothing
+            continue;
+          }
           const Tc = temperature(Hc);
           // heat sources (applied sequentially, each limited so it cannot overshoot its own temperature)
           let Hs = Hc;
@@ -182,7 +196,7 @@ export class CpuSolver {
             [i, j, k + 1],
           ];
           for (const [a, b, d] of nbs) {
-            if (a < 0 || b < 0 || d < 0 || a >= nx || b >= ny || d >= nz) continue;
+            if (a < 0 || b < 0 || d < 0 || a >= nx || b >= rows || d >= nz) continue; // walls and surface adiabatic
             const Hn = H[this.idx(a, b, d)];
             const kn = conductivity(Hn);
             const kf = (2 * kc * kn) / (kc + kn);
@@ -199,7 +213,7 @@ export class CpuSolver {
               dDrift += x0 * (vaporEnthalpy(Hb) - liquidEnthalpy(Hc));
             }
           }
-          if (!solidC && j < ny - 1) {
+          if (!solidC && j < rows - 1) {
             const Ha = H[this.idx(i, j + 1, k)];
             if (!isSolid(Ha)) {
               const x0 = cD * vaporQuality(Hc) * (1 - vaporQuality(Ha));
@@ -465,10 +479,22 @@ export class CpuSolver {
   cellMass() {
     return this.p.rho0 * this.p.h ** 3;
   }
-  /** total enthalpy (energy) in the box [J], relative to ice at 0 °C */
+  /** is cell index c a water cell (below the surface)? */
+  isWaterCell(c: number) {
+    return Math.floor(c / this.g.nx) % this.g.ny < this.rows;
+  }
+  /** number of water cells */
+  waterCells() {
+    return this.g.nx * this.rows * this.g.nz;
+  }
+  /** total mass of water (all phases) [kg]: constant, the grid is fixed and incompressible */
+  waterMass() {
+    return this.waterCells() * this.cellMass();
+  }
+  /** total enthalpy (energy) of the water [J], relative to ice at 0 °C. Air cells hold no water. */
   totalEnergy(H = this.H) {
     let s = 0;
-    for (let c = 0; c < H.length; c++) s += H[c];
+    for (let c = 0; c < H.length; c++) if (this.isWaterCell(c)) s += H[c];
     return s * this.cellMass();
   }
   /** total energy injected (or removed, if negative) by heat sources [J] */
@@ -477,15 +503,17 @@ export class CpuSolver {
     for (let c = 0; c < this.srcAcc.length; c++) s += this.srcAcc[c];
     return s * this.cellMass();
   }
-  /** masses [kg] of ice, liquid and vapour */
+  /** masses [kg] of ice, liquid and vapour (water cells only) */
   phaseMasses(H = this.H) {
-    let ice = 0, vap = 0;
+    let ice = 0, vap = 0, n = 0;
     for (let c = 0; c < H.length; c++) {
+      if (!this.isWaterCell(c)) continue;
       ice += 1 - Math.min(1, Math.max(0, H[c] / L_F));
       vap += vaporQuality(H[c]);
+      n++;
     }
     const m = this.cellMass();
-    return { ice: ice * m, liquid: (H.length - ice - vap) * m, vapor: vap * m, total: H.length * m };
+    return { ice: ice * m, liquid: (n - ice - vap) * m, vapor: vap * m, total: n * m };
   }
   /** max |div u| over fluid cells [1/s] for the given velocity */
   maxDivergence(vel = this.vel) {

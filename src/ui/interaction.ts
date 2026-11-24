@@ -8,6 +8,7 @@
  */
 import { Vector3, type Ray } from "@babylonjs/core";
 import type { App } from "../app";
+import { waterRows } from "../sim/params";
 
 export type Tool = "hot" | "cold" | "move" | "erase";
 
@@ -91,7 +92,8 @@ export class Interaction {
   /** clamp a source centre (domain metres) so the sphere stays inside the tank */
   clampInside(x: number, y: number, z: number, r: number) {
     const p = this.app.state.params;
-    const L = [p.nx * p.h, p.ny * p.h, p.nz * p.h];
+    // sources live in the water: the top of the usable region is the water surface
+    const L = [p.nx * p.h, waterRows(p) * p.h, p.nz * p.h];
     const m = Math.min(r * 0.6, Math.min(...L) * 0.45);
     return {
       x: Math.min(L[0] - m, Math.max(m, x)),

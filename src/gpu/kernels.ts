@@ -56,6 +56,8 @@ fn VMAX() -> f32 { return P[13]; }
 fn VORT() -> f32 { return P[14]; }
 fn SOR() -> f32 { return P[15]; }
 fn NSRC() -> i32 { return i32(P[16]); }
+/** water rows: cells with j >= ROWS() are air (above the water surface) */
+fn ROWS() -> i32 { return i32(P[17]); }
 
 fn ncells() -> i32 { return NX() * NY() * NZ(); }
 fn nU() -> i32 { return (NX() + 1) * NY() * NZ(); }
@@ -139,6 +141,7 @@ fn minmod(a : f32, b : f32) -> f32 {
 const SOLID = /* wgsl */ `
 fn solidAt(i : i32, j : i32, k : i32) -> bool {
   if (!inDomain(i, j, k)) { return true; }
+  if (j >= ROWS()) { return true; } // air: the surface acts as a rigid lid
   return isSolidH(Hs[cidx(i, j, k)]);
 }
 fn faceOpen(a : i32, i : i32, j : i32, k : i32) -> bool {
@@ -206,6 +209,7 @@ ${CELL_HEAD}
   let condK = dts * KSCALE() / (RHO0() * h * h);
   let cD = BRISE() * max(0.0, GRAV() / 9.81) * dts / h;
   let Hc = Hs[c];
+  if (j >= ROWS()) { Hout[c] = Hc; return; } // air: holds no water, exchanges nothing
   let Tc = temperature(Hc);
   // heat sources
   var Hsrc = Hc;
@@ -233,7 +237,7 @@ ${CELL_HEAD}
     else if (n == 2) { o = vec3<i32>(0, -1, 0); } else if (n == 3) { o = vec3<i32>(0, 1, 0); }
     else if (n == 4) { o = vec3<i32>(0, 0, -1); } else { o = vec3<i32>(0, 0, 1); }
     let a = i + o.x; let b = j + o.y; let e = k + o.z;
-    if (!inDomain(a, b, e)) { continue; }
+    if (!inDomain(a, b, e) || b >= ROWS()) { continue; } // walls and surface adiabatic
     let Hn = Hs[cidx(a, b, e)];
     let kn = conductivity(Hn);
     let kf = 2.0 * kc * kn / (kc + kn);
@@ -250,7 +254,7 @@ ${CELL_HEAD}
       dDrift += x0 * (vaporEnthalpy(Hb) - liquidEnthalpy(Hc));
     }
   }
-  if (!solidC && j < NY() - 1) {
+  if (!solidC && j < ROWS() - 1) {
     let Ha = Hs[cidx(i, j + 1, k)];
     if (!isSolidH(Ha)) {
       let x0 = cD * vaporQuality(Hc) * (1.0 - vaporQuality(Ha));
@@ -414,7 +418,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(local_invocatio
   let c = i32(gid.x);
   let l = lid.x;
   var v = array<f32, 7>(0.0, 0.0, 0.0, 0.0, -1e30, 1e30, 0.0);
-  if (c < ncells()) {
+  if (c < ncells() && (c / NX()) % NY() < ROWS()) { // water cells only
     let H = Hs[c];
     let T = temperature(H);
     v = array<f32, 7>(H, srcAcc[c], iceFraction(H), vaporQuality(H), T, T, T);
@@ -511,7 +515,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     let chi = vaporQuality(H);
     if (H > H_B) { size = min(BP[3], size + dtf * BP[3] * (0.8 + 4.0 * chi)); }
     else { size -= dtf * BP[3] * (0.6 + 0.08 * (100.0 - temperature(H))); }
-    if (pos.y >= L.y - 0.5 * h || isSolidH(H) || size <= 0.02 * BP[3] || age > 8.0 || chi >= 0.999) { alive = 0.0; }
+    if (pos.y >= f32(ROWS()) * h - 0.5 * h || isSolidH(H) || size <= 0.02 * BP[3] || age > 8.0 || chi >= 0.999) { alive = 0.0; }
     pos = clamp(pos, vec3f(0.0), L);
   }
   parts[o] = pos.x; parts[o + 1] = pos.y; parts[o + 2] = pos.z;

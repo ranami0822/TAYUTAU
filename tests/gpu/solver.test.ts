@@ -99,3 +99,24 @@ describe("conservation on the GPU", () => {
     expect(s.maxDivergence()).toBeLessThan(0.05 * scale);
   });
 });
+
+describe("water surface on the GPU", () => {
+  it("matches the CPU reference with a 70 % water level and keeps the air untouched", async () => {
+    const n = 10;
+    const L = n * defaultParams(n).h;
+    const { p, s, H0, vel0 } = setup(n, { waterLevel: 0.7, sources: [{ x: L / 2, y: L * 0.2, z: L / 2, r: L * 0.2, T: 300 }] }, 21);
+    // setup's random flow was projected with the surface in place (faces into the air are zero)
+    const g = await gpu({ params: p, H: H0, vel: vel0, steps: 5 });
+    for (let k = 0; k < 5; k++) s.step();
+    const snap = g.snaps[0];
+    expect(maxAbsDiff(snap.H, s.H)).toBeLessThan(20);
+    expect(maxAbsDiff(snap.vel, s.vel)).toBeLessThan(1e-3 * p.vMax);
+    for (let c = 0; c < s.g.nCells; c++) if (!s.isWaterCell(c)) expect(snap.H[c]).toBe(H0[c]);
+    const m = p.rho0 * p.h ** 3;
+    const water = (a: number[]) => a.reduce((acc, v, c) => acc + (s.isWaterCell(c) ? v : 0), 0) * m;
+    const E0 = water(H0);
+    const inj = snap.srcAcc.reduce((a, b) => a + b, 0) * m;
+    expect(Math.abs(inj)).toBeGreaterThan(1);
+    expect(Math.abs(water(snap.H) - E0 - inj) / E0).toBeLessThan(1e-5);
+  });
+});

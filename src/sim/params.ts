@@ -66,9 +66,23 @@ export interface SimParams {
   pressureIters: number;
   /** SOR over-relaxation factor (1 = plain Gauss–Seidel) */
   sorOmega: number;
+  /**
+   * Water level as a fraction of the tank height (0..1]. Cells in rows j >= waterRows(p) are air:
+   * no water, no flow, no heat. The water surface is a fixed horizontal boundary (rigid-lid
+   * approximation, no waves yet): normal velocity 0, free slip, adiabatic. 1 = full tank.
+   */
+  waterLevel: number;
   /** heat sources (at most MAX_SOURCES) */
   sources: HeatSource[];
 }
+
+/** Number of water rows (cells j < waterRows are water). At least one row. */
+export function waterRows(p: Pick<SimParams, "ny" | "waterLevel">): number {
+  return Math.min(p.ny, Math.max(1, Math.round(p.waterLevel * p.ny)));
+}
+
+/** Water level used by the app: see README (why 70 %). */
+export const APP_WATER_LEVEL = 0.7;
 
 export function defaultParams(n = 48): SimParams {
   const L = 0.05; // [GAME-ish] 5 cm tank: small so that heating to boiling takes seconds, not minutes
@@ -94,6 +108,7 @@ export function defaultParams(n = 48): SimParams {
     vortEps: 0.3,
     pressureIters: 40,
     sorOmega: 1.6,
+    waterLevel: 1,
     sources: [],
   };
 }
@@ -124,6 +139,7 @@ export function packParams(p: SimParams): Float32Array {
   a[14] = p.vortEps;
   a[15] = p.sorOmega;
   a[16] = Math.min(p.sources.length, MAX_SOURCES);
+  a[17] = waterRows(p);
   for (let s = 0; s < Math.min(p.sources.length, MAX_SOURCES); s++) {
     const src = p.sources[s];
     const o = 32 + s * 8;

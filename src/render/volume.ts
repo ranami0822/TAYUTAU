@@ -86,6 +86,24 @@ fn tempColor(T : f32) -> vec3f {
   return mix(vec3f(1.0, 0.2, 0.08), vec3f(1.0, 0.95, 0.9), clamp((T - 100.0) / 200.0, 0.0, 1.0));
 }
 
+/** water surface (flat, normal +y): Fresnel reflection of a simple sky, sun highlight and a faint tint.
+    Returns premultiplied colour and alpha. */
+fn surfaceColor(rd : vec3f, fromAbove : bool) -> vec4f {
+  var n = vec3f(0.0, 1.0, 0.0);
+  if (!fromAbove) { n = vec3f(0.0, -1.0, 0.0); }
+  let cosi = max(dot(n, -rd), 0.0);
+  var F = 0.02 + 0.98 * pow(1.0 - cosi, 5.0);
+  if (!fromAbove && cosi < 0.661) { F = 1.0; } // critical angle of water (n = 1.333)
+  let r = reflect(rd, n);
+  let sky = mix(vec3f(0.08, 0.11, 0.16), vec3f(0.55, 0.68, 0.85), clamp(r.y * 0.5 + 0.5, 0.0, 1.0));
+  var sun = 0.0;
+  if (fromAbove) { sun = pow(max(dot(r, normalize(uniforms.lightDir)), 0.0), 160.0); }
+  let tint = vec3f(0.45, 0.7, 0.9);
+  let a = clamp(0.2 + 0.8 * F + sun, 0.0, 1.0);
+  let c = sky * F * 0.9 + vec3f(1.0) * sun + tint * 0.2;
+  return vec4f(c, a);
+}
+
 fn raySphere(ro : vec3f, rd : vec3f, c : vec3f, r : f32) -> f32 {
   let oc = ro - c;
   let b = dot(oc, rd);
@@ -110,7 +128,10 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   let tNear = max(max(max(tmin.x, tmin.y), tmin.z), 0.0);
   var tFar = min(min(tmax.x, tmax.y), tmax.z);
   if (tFar <= tNear) { discard; }
+  let tBox = tFar;
 
+  var col = vec3f(0.0);
+  var alpha = 0.0;
   // nearest heat source along the ray
   var srcT = 1e9;
   var srcIdx = -1;
@@ -126,13 +147,28 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   let size = uniforms.boxMax - uniforms.boxMin;
   let toGrid = uniforms.dims / size;
   let cellW = size.x / uniforms.dims.x;
+
+  // water surface: the plane at the top of the water rows (P[17]); above it is air (fully transparent)
+  let ys = uniforms.boxMin.y + P[17] * (size.y / uniforms.dims.y);
+  var wA = tNear;
+  var wB = tFar;
+  var tSurf = -1.0;
+  if (abs(rd.y) > 1e-7) {
+    let tp = (ys - ro.y) / rd.y;
+    if (rd.y < 0.0) { wA = max(wA, tp); } else { wB = min(wB, tp); }
+    if (tp > tNear && tp < tBox && tp < srcT) { tSurf = tp; }
+  } else if (ro.y >= ys) { wB = wA; }
+  if (rd.y < 0.0 && tSurf > 0.0) {
+    let sc = surfaceColor(rd, true);
+    col += (1.0 - alpha) * sc.rgb;
+    alpha += (1.0 - alpha) * sc.a;
+  }
   let stepLen = cellW * 0.75;
-  var col = vec3f(0.0);
-  var alpha = 0.0;
   // per-pixel jitter of the first sample hides step banding
   let fc = input.position.xy;
   let jit = fract(sin(dot(fc, vec2f(12.9898, 78.233))) * 43758.5453);
-  var t = tNear + stepLen * jit;
+  var t = wA + stepLen * jit;
+  tFar = min(wB, tFar);
   let tempMode = uniforms.viewMode > 0.5;
   var hitIce = false;
   loop {
@@ -143,7 +179,7 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     let fi = iceFraction(H);
     if (fi > 0.5) {
       // refine the iso-surface (ice fraction 0.5) between the previous and this sample
-      var lo = max(t - stepLen, tNear);
+      var lo = max(t - stepLen, wA);
       var hi = t;
       for (var r = 0; r < 5; r++) {
         let mid = 0.5 * (lo + hi);
@@ -195,7 +231,14 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
     t += stepLen;
   }
 
-  if (!hitIce && srcIdx >= 0 && srcT < 1e8 && alpha < 0.99) {
+  if (!hitIce && rd.y > 0.0 && tSurf > 0.0 && alpha < 0.99) {
+    // the surface seen from below (total internal reflection beyond the critical angle)
+    let sc = surfaceColor(rd, false);
+    col += (1.0 - alpha) * sc.rgb;
+    alpha += (1.0 - alpha) * sc.a;
+  }
+
+  if (!hitIce && srcIdx >= 0 && srcT < 1e8 && srcT >= wA && srcT <= wB + 1e-6 && alpha < 0.99) {
     let o = 32 + srcIdx * 8;
     let c = uniforms.boxMin + vec3f(P[o], P[o + 1], P[o + 2]) * uniforms.metersToWorld;
     let p = ro + rd * srcT;

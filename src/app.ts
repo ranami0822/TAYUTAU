@@ -9,7 +9,7 @@ import {
   type WebGPUEngine,
 } from "@babylonjs/core";
 import { GpuSolver, type SimStats } from "./gpu/gpuSolver";
-import { defaultParams, MAX_SOURCES, type HeatSource, type SimParams } from "./sim/params";
+import { defaultParams, waterRows, APP_WATER_LEVEL, MAX_SOURCES, type HeatSource, type SimParams } from "./sim/params";
 import { VolumeRenderer } from "./render/volume";
 import { BubbleRenderer } from "./render/bubbles";
 import { Interaction, type Tool } from "./ui/interaction";
@@ -61,7 +61,7 @@ export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement):
   // phones / tablets get a coarser default grid (the whole step runs on their GPU every frame)
   const coarse = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
   const n = Math.min(96, Math.max(16, Number(url.get("n")) || (coarse ? 32 : 48)));
-  const params = defaultParams(n);
+  const params = { ...defaultParams(n), waterLevel: APP_WATER_LEVEL };
 
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.035, 0.05, 0.07, 1);
@@ -86,6 +86,13 @@ export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement):
   edges.color = new Color3(0.55, 0.7, 0.85);
   edges.alpha = 0.6;
   edges.isPickable = false;
+  // water line on the glass, so the surface is visible from every side
+  const yw = a.y + (waterRows(params) / params.ny) * (b.y - a.y);
+  const wl = [V(a.x, yw, a.z), V(b.x, yw, a.z), V(b.x, yw, b.z), V(a.x, yw, b.z), V(a.x, yw, a.z)];
+  const waterLine = MeshBuilder.CreateLines("waterLine", { points: wl }, scene);
+  waterLine.color = new Color3(0.6, 0.85, 1.0);
+  waterLine.alpha = 0.9;
+  waterLine.isPickable = false;
   const floor = MeshBuilder.CreateDisc("floor", { radius: 2.2, tessellation: 64 }, scene);
   floor.rotation.x = Math.PI / 2;
   floor.position.y = volume.boxMin.y - 0.002;
@@ -160,7 +167,7 @@ export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement):
         for (let k = 0; k < nz; k++)
           for (let j = 0; j < ny; j++)
             for (let i = 0; i < nx; i++) {
-              const inBlock = Math.abs(i - nx / 2) < nx * 0.18 && Math.abs(k - nz / 2) < nz * 0.18 && j > ny * 0.45 && j < ny * 0.8;
+              const inBlock = Math.abs(i - nx / 2) < nx * 0.18 && Math.abs(k - nz / 2) < nz * 0.18 && j > ny * 0.3 && j < ny * 0.6; // inside the water (level 70 %)
               if (inBlock) H[i + nx * (j + ny * k)] = enthalpyFromT(-15);
             }
         sim.H.update(H);
