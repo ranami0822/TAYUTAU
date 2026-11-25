@@ -187,9 +187,26 @@ export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement):
   await sim.ready();
   await bubbles.ready();
 
+  const prevPos = new WeakMap<HeatSource, [number, number, number]>();
   let statsBusy = false;
   let lastStats = 0;
   scene.onBeforeRenderObservable.add(() => {
+    // velocity of each source from how far it moved since the last frame (the drag); a moving source
+    // pushes the water and makes waves. Clamped to the solver's velocity limit.
+    const simDt = state.paused ? 0 : state.stepsPerFrame * params.dt;
+    state.sources.forEach((q) => {
+      const prev = prevPos.get(q);
+      let v = [0, 0, 0];
+      if (prev && simDt > 0) {
+        const c = (d: number) => Math.min(params.vMax, Math.max(-params.vMax, d / simDt));
+        v = [c(q.x - prev[0]), c(q.y - prev[1]), c(q.z - prev[2])];
+      }
+      if (v[0] !== (q.vx ?? 0) || v[1] !== (q.vy ?? 0) || v[2] !== (q.vz ?? 0)) {
+        q.vx = v[0]; q.vy = v[1]; q.vz = v[2];
+        state.dirty = true;
+      }
+      prevPos.set(q, [q.x, q.y, q.z]);
+    });
     if (state.dirty) {
       sim.setParams({ ...params, sources: state.sources });
       state.dirty = false;

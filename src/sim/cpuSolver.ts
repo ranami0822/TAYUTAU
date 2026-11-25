@@ -250,7 +250,7 @@ export class CpuSolver {
     const j = this.rows - 1;
     const w = j > 0 ? this.vel[this.vIdx(i, j, k)] : 0; // vertical velocity just under the top water cell
     const chi = vaporQuality(this.H[this.idx(i, j, k)]);
-    const burst = p.burstProb > 0 && bursts(i + this.g.nx * k, this.stepCount, p.burstProb) ? 1 / p.burstProb : 0;
+    const burst = p.burstProb > 0 ? (bursts(i + this.g.nx * k, this.stepCount, p.burstProb) ? 1 / p.burstProb : 0) : 1;
     const e = (p.waveGain * w * Math.abs(w)) / (2 * p.g || 1) + p.vaporLift * chi * burst;
     return Math.min(p.waveCap, Math.max(-p.waveCap, e));
   }
@@ -276,15 +276,40 @@ export class CpuSolver {
       }
   }
   /** d eta/dt = -div q (flux form: the sum of eta, i.e. the water volume, is conserved exactly) */
+  /** vertical velocity just under the top water cell (proxy for the surface velocity under the rigid lid) */
+  surfaceW(i: number, k: number) {
+    const j = this.rows - 1;
+    return j > 0 ? this.vel[this.vIdx(i, j, k)] : 0;
+  }
+  /** mean of surfaceW over the unfrozen columns: [mean, count] (twin of the surfaceMean kernel) */
+  surfaceMean(): [number, number] {
+    const { nx, nz } = this.g;
+    let sum = 0, n = 0;
+    for (let k = 0; k < nz; k++)
+      for (let i = 0; i < nx; i++)
+        if (!this.surfaceFrozen(i, k)) {
+          sum += this.surfaceW(i, k);
+          n++;
+        }
+    return [n > 0 ? sum / n : 0, n];
+  }
+  /**
+   * d eta/dt = -div q + (w - mean w): wave propagation plus the kinematic surface condition (the surface rises
+   * where the water below moves up). Subtracting the mean keeps the volume exact; for an incompressible flow
+   * under a closed lid the mean is zero anyway (up to the pressure-solver residual).
+   */
   waveHeight(dts: number) {
     const { nx, nz } = this.g;
     const oz = (nx + 1) * nz;
     const r = dts / this.p.h;
+    const [wm] = this.surfaceMean();
     for (let k = 0; k < nz; k++)
       for (let i = 0; i < nx; i++) {
         const qx = this.q[i + 1 + (nx + 1) * k] - this.q[i + (nx + 1) * k];
         const qz = this.q[oz + i + nx * (k + 1)] - this.q[oz + i + nx * k];
-        this.eta[i + nx * k] -= r * (qx + qz);
+        let e = this.eta[i + nx * k] - r * (qx + qz);
+        if (!this.surfaceFrozen(i, k)) e += dts * (this.surfaceW(i, k) - wm);
+        this.eta[i + nx * k] = e;
       }
   }
   /** water volume [m^3]: fixed water rows + surface displacement */
@@ -413,6 +438,14 @@ export class CpuSolver {
         const bA = buoyancy(this.H[this.idx(i, j - 1, k)], p);
         const bB = buoyancy(this.H[this.idx(i, j, k)], p);
         val += p.dt * 0.5 * (bA + bB);
+      }
+      // a source that is being moved pushes the water: inside its sphere the velocity follows the source
+      for (let q = 0; q < Math.min(p.sources.length, MAX_SOURCES); q++) {
+        const src = p.sources[q];
+        const sv = [src.vx ?? 0, src.vy ?? 0, src.vz ?? 0];
+        if (sv[0] === 0 && sv[1] === 0 && sv[2] === 0) continue;
+        const dx = x * p.h - src.x, dy = y * p.h - src.y, dz = z * p.h - src.z;
+        if (dx * dx + dy * dy + dz * dz < src.r * src.r) val = sv[axis];
       }
       this.vel2[f] = Math.min(p.vMax, Math.max(-p.vMax, val));
     }

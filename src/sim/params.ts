@@ -17,6 +17,10 @@ export interface HeatSource {
   r: number;
   /** surface temperature of the heater / cooler [°C] */
   T: number;
+  /** velocity of the source while the user moves it [m/s]; a moving source pushes the water (see advectVel) */
+  vx?: number;
+  vy?: number;
+  vz?: number;
 }
 
 export interface SimParams {
@@ -84,12 +88,13 @@ export interface SimParams {
   /** [GAME] gain on the dynamic head w|w|/(2g) of the up-flow under the surface (real hump is ~0.1 mm, invisible) */
   waveGain: number;
   /**
-   * [GAME] surface lift per unit vapour quality in the top water row [m] (bursting bubbles). Bursts are
-   * intermittent: each column bursts in a step with probability burstProb (deterministic hash shared by
-   * CPU and GPU), and a burst lifts by vaporLift * chi / burstProb, so the mean lift is vaporLift * chi.
+   * [GAME] surface lift per unit vapour quality in the top water row [m] (bubbles reaching the surface).
+   * With burstProb > 0 the lift is intermittent (each column bursts in a step with probability burstProb,
+   * deterministic hash shared by CPU and GPU, lift vaporLift * chi / burstProb); with burstProb = 0 it is
+   * steady (vaporLift * chi). Default: steady, the intermittent version made the surface too noisy.
    */
   vaporLift: number;
-  /** [GAME] probability that a boiling surface column bursts in a given step */
+  /** [GAME] probability that a boiling surface column bursts in a given step (0 = steady lift, the default) */
   burstProb: number;
   /** [GAME/numerical] cap on |etaForced| [m] (keeps the linear, small-amplitude assumption) */
   waveCap: number;
@@ -155,7 +160,7 @@ export function defaultParams(n = 48): SimParams {
     waveDamping: 1.5,
     waveGain: 40,
     vaporLift: 0.05,
-    burstProb: 0.15,
+    burstProb: 0,
     waveCap: 0.002, // 2 mm: about 2 cells at 48^3, independent of the grid
     sources: [],
   };
@@ -203,6 +208,9 @@ export function packParams(p: SimParams): Float32Array {
     a[o + 2] = src.z;
     a[o + 3] = src.r;
     a[o + 4] = src.T;
+    a[o + 5] = src.vx ?? 0;
+    a[o + 6] = src.vy ?? 0;
+    a[o + 7] = src.vz ?? 0;
   }
   return a;
 }

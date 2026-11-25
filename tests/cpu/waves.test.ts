@@ -97,3 +97,49 @@ describe("surface waves", () => {
     expect(Array.from(f.eta)).toEqual(eta0);
   });
 });
+
+describe("waves from a moving object (kinematic surface condition)", () => {
+  const run = (vx: number, steps = 40) => {
+    const p = smallParams(n, { waterLevel: 0.7, g: 9.81 });
+    const L = n * p.h;
+    // a room-temperature body (no heating, no buoyancy differences) just under the surface
+    p.sources = [{ x: L * 0.4, y: L * 0.55, z: L / 2, r: L * 0.12, T: 20, vx, vy: 0, vz: 0 }];
+    const s = new CpuSolver(p);
+    for (let it = 0; it < steps; it++) {
+      s.step();
+      p.sources[0].x += vx * p.dt; // the body really moves
+    }
+    return s;
+  };
+  it("a body dragged under the surface pushes the water and raises waves; a resting body does not", () => {
+    const moving = run(0.05);
+    const resting = run(0);
+    const amp = (s: CpuSolver) => Math.max(...s.eta.map(Math.abs));
+    expect(amp(moving)).toBeGreaterThan(0.05 * moving.p.h);
+    expect(amp(resting)).toBeLessThan(1e-6 * resting.p.h);
+    // the water around the body moves along with it (+x)
+    const s = moving;
+    let ux = 0;
+    const i0 = Math.round((s.p.sources[0].x / s.p.h));
+    for (let k = 6; k < 10; k++) for (let j = 7; j < 10; j++) ux += s.vel[s.uIdx(Math.min(n, i0), j, k)];
+    expect(ux).toBeGreaterThan(0);
+  });
+
+  it("the volume stays exact with the moving body (f64)", () => {
+    const p = smallParams(n, { waterLevel: 0.7 });
+    const L = n * p.h;
+    p.sources = [{ x: L * 0.4, y: L * 0.55, z: L / 2, r: L * 0.12, T: 20, vx: 0.05, vy: 0.02, vz: -0.03 }];
+    const s = toF64(new CpuSolver(p));
+    (s as unknown as { eta: Float64Array }).eta = Float64Array.from(s.eta);
+    (s as unknown as { q: Float64Array }).q = Float64Array.from(s.q);
+    const V0 = s.waterVolume();
+    for (let it = 0; it < 30; it++) s.step();
+    expect(Math.max(...s.eta.map(Math.abs))).toBeGreaterThan(1e-6);
+    expect(Math.abs(s.waterVolume() - V0) / V0).toBeLessThan(1e-12);
+  });
+
+  it("is deterministic and smooth by default (no random bursts)", () => {
+    const p = smallParams(n, { waterLevel: 0.7 });
+    expect(p.burstProb).toBe(0);
+  });
+});

@@ -45,6 +45,8 @@ export class GpuSolver {
   readonly nQ: number;
   /** clock[0] = number of steps taken (as f32: exact up to 2^24 steps, ~39 h at 120 steps/s) */
   readonly clock: StorageBuffer;
+  /** [mean vertical velocity under the surface, number of unfrozen columns] */
+  readonly wmean: StorageBuffer;
   readonly nGroups: number;
   private shaders: Record<string, ComputeShader> = {};
   time = 0;
@@ -71,6 +73,7 @@ export class GpuSolver {
     this.eta = buf(p.nx * p.nz, "eta");
     this.q = buf(this.nQ, "waveFlux");
     this.clock = buf(4, "clock");
+    this.wmean = buf(4, "wmean");
     this.setParams(p);
     this.H.update(new Float32Array(nC).fill(enthalpyFromT(initialT)));
     this.reset(initialT);
@@ -94,7 +97,8 @@ export class GpuSolver {
     this.make(KERNELS.pressureBlack, B);
     this.make(KERNELS.waveFlux, { Hs: this.H, vin: this.vel, eta: this.eta, clock: this.clock, q: this.q });
     this.make(KERNELS.tick, { clock: this.clock });
-    this.make(KERNELS.waveHeight, { q: this.q, eta: this.eta });
+    this.make(KERNELS.surfaceMean, { Hs: this.H, vin: this.vel, wmean: this.wmean });
+    this.make(KERNELS.waveHeight, { q: this.q, Hs: this.H, vin: this.vel, wmean: this.wmean, eta: this.eta });
     this.make(KERNELS.reduce, { Hs: this.H, srcAcc: this.srcAcc, partials: this.partials });
     this.make(KERNELS.project, { vin: this.vel2, phi: this.phi, Hs: this.H, vout: this.vel });
   }
@@ -158,6 +162,7 @@ export class GpuSolver {
       const ws = waveSubsteps(this.p);
       for (let w = 0; w < ws; w++) {
         this.dispatch("waveFlux", this.nQ);
+        if (!this.shaders.surfaceMean.dispatch(1, 1, 1)) throw new Error("dispatch failed: surfaceMean");
         this.dispatch("waveHeight", this.g.nx * this.g.nz);
       }
     }
@@ -209,6 +214,6 @@ export class GpuSolver {
   }
 
   dispose() {
-    for (const b of [this.P, this.H, this.Htmp, this.vel, this.vel2, this.phi, this.div, this.omega, this.srcAcc, this.partials, this.eta, this.q, this.clock]) b.dispose();
+    for (const b of [this.P, this.H, this.Htmp, this.vel, this.vel2, this.phi, this.div, this.omega, this.srcAcc, this.partials, this.eta, this.q, this.clock, this.wmean]) b.dispose();
   }
 }

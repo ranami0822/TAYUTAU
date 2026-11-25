@@ -327,6 +327,14 @@ ${FACE_HEAD}
     let bB = buoyancyOf(Hs[cidx(i, j, k)]);
     val += DT() * 0.5 * (bA + bB);
   }
+  // a source that is being moved pushes the water: inside its sphere the velocity follows the source
+  for (var q = 0; q < NSRC(); q++) {
+    let o = 32 + q * 8;
+    let sv = vec3<f32>(P[o + 5], P[o + 6], P[o + 7]);
+    if (sv.x == 0.0 && sv.y == 0.0 && sv.z == 0.0) { continue; }
+    let d = vec3<f32>(x * HH() - P[o], y * HH() - P[o + 1], z * HH() - P[o + 2]);
+    if (dot(d, d) < P[o + 3] * P[o + 3]) { val = sv[a]; }
+  }
   vout[fi] = clamp(val, -VMAX(), VMAX());
 }`,
   },
@@ -559,8 +567,11 @@ fn etaForced(i : i32, k : i32) -> f32 {
   let chi = vaporQuality(Hs[cidx(i, j, k)]);
   var g = GRAV();
   if (g == 0.0) { g = 1.0; }
-  var burst = 0.0;
-  if (BPROB() > 0.0 && bursts(i + NX() * k)) { burst = 1.0 / BPROB(); }
+  var burst = 1.0; // steady lift when BPROB() == 0
+  if (BPROB() > 0.0) {
+    burst = 0.0;
+    if (bursts(i + NX() * k)) { burst = 1.0 / BPROB(); }
+  }
   let e = WGAIN() * w * abs(w) / (2.0 * g) + VLIFT() * chi * burst;
   return clamp(e, -WCAP(), WCAP());
 }
@@ -587,12 +598,53 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }`,
   },
 
+  /** mean vertical velocity under the surface over unfrozen columns (twin of CpuSolver.surfaceMean); one workgroup */
+  surfaceMean: {
+    name: "surfaceMean",
+    domain: "cells",
+    bindings: [
+      { name: "Hs", access: "read" },
+      { name: "vin", access: "read" },
+      { name: "wmean", access: "read_write" },
+    ],
+    body: /* wgsl */ `
+var<workgroup> sw : array<f32, 256>;
+var<workgroup> sn : array<f32, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid : vec3<u32>) {
+  let l = i32(lid.x);
+  let nx = NX(); let nz = NZ(); let j = ROWS() - 1;
+  var sum = 0.0; var n = 0.0;
+  for (var c = l; c < nx * nz; c += 256) {
+    let i = c % nx; let k = c / nx;
+    if (!isSolidH(Hs[cidx(i, j, k)])) {
+      if (j > 0) { sum += vin[vIdx(i, j, k)]; }
+      n += 1.0;
+    }
+  }
+  sw[l] = sum; sn[l] = n;
+  workgroupBarrier();
+  for (var s = 128; s > 0; s = s >> 1u) {
+    if (l < s) { sw[l] = sw[l] + sw[l + s]; sn[l] = sn[l] + sn[l + s]; }
+    workgroupBarrier();
+  }
+  if (l == 0) {
+    var m = 0.0;
+    if (sn[0] > 0.0) { m = sw[0] / sn[0]; }
+    wmean[0] = m; wmean[1] = sn[0];
+  }
+}`,
+  },
+
   /** surface waves, height update (twin of CpuSolver.waveHeight); one thread per surface column */
   waveHeight: {
     name: "waveHeight",
     domain: "cells",
     bindings: [
       { name: "q", access: "read" },
+      { name: "Hs", access: "read" },
+      { name: "vin", access: "read" },
+      { name: "wmean", access: "read" },
       { name: "eta", access: "read_write" },
     ],
     body: /* wgsl */ `
@@ -603,10 +655,18 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (c >= nx * nz) { return; }
   let i = c % nx; let k = c / nx;
   let oz = (nx + 1) * nz;
-  let r = DT() / SUBC() / WSUB() / HH();
+  let dts = DT() / SUBC() / WSUB();
+  let r = dts / HH();
   let qx = q[i + 1 + (nx + 1) * k] - q[i + (nx + 1) * k];
   let qz = q[oz + i + nx * (k + 1)] - q[oz + i + nx * k];
-  eta[c] = eta[c] - r * (qx + qz);
+  var e = eta[c] - r * (qx + qz);
+  let j = ROWS() - 1;
+  if (!isSolidH(Hs[cidx(i, j, k)])) {
+    var w = 0.0;
+    if (j > 0) { w = vin[vIdx(i, j, k)]; }
+    e += dts * (w - wmean[0]);
+  }
+  eta[c] = e;
 }`,
   },
 

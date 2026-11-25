@@ -139,3 +139,16 @@ describe("surface waves on the GPU", () => {
     expect(Math.abs(e.reduce((a, b) => a + b, 0) - sum0)).toBeLessThan(1e-6 * p.h * e.length);
   });
 });
+
+describe("waves from a moving object on the GPU", () => {
+  it("match the CPU reference", async () => {
+    const n = 12;
+    const L = n * defaultParams(n).h;
+    const { p, s, H0, vel0 } = setup(n, { waterLevel: 0.7, sources: [{ x: L * 0.4, y: L * 0.5, z: L / 2, r: L * 0.15, T: 20, vx: 0.04, vy: 0.01, vz: 0 }] }, 41);
+    const g = await gpu({ params: p, H: H0, vel: vel0, steps: 4 });
+    for (let k = 0; k < 4; k++) s.step();
+    expect(maxAbsDiff(g.snaps[0].vel, s.vel)).toBeLessThan(1e-3 * p.vMax);
+    expect(maxAbsDiff(g.snaps[0].eta, s.eta)).toBeLessThan(1e-3 * p.h);
+    expect(Math.max(...s.eta.map(Math.abs))).toBeGreaterThan(1e-4 * p.h);
+  });
+});
