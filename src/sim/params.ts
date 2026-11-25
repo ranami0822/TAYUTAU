@@ -72,6 +72,27 @@ export interface SimParams {
    * approximation, no waves yet): normal velocity 0, free slip, adiabatic. 1 = full tank.
    */
   waterLevel: number;
+  /**
+   * Surface waves: a small-amplitude height field eta(x, z) [m] above the mean water level, evolved
+   * by a linear wave equation in flux form (d eta/dt = -div q, dq/dt = -c^2 grad(eta - etaForced) - gamma q).
+   * Phase speed [m/s]: 0.23 m/s is the minimum phase speed of capillary-gravity waves on water (at a
+   * wavelength of about 1.7 cm), the right order for cm-scale ripples (rounded textbook value; not dispersive here).
+   */
+  waveSpeed: number;
+  /** [GAME] damping rate of the waves [1/s]; real viscous damping of cm ripples is weaker (未確認), chosen so the surface settles in ~1 s */
+  waveDamping: number;
+  /** [GAME] gain on the dynamic head w|w|/(2g) of the up-flow under the surface (real hump is ~0.1 mm, invisible) */
+  waveGain: number;
+  /**
+   * [GAME] surface lift per unit vapour quality in the top water row [m] (bursting bubbles). Bursts are
+   * intermittent: each column bursts in a step with probability burstProb (deterministic hash shared by
+   * CPU and GPU), and a burst lifts by vaporLift * chi / burstProb, so the mean lift is vaporLift * chi.
+   */
+  vaporLift: number;
+  /** [GAME] probability that a boiling surface column bursts in a given step */
+  burstProb: number;
+  /** [GAME/numerical] cap on |etaForced| [m] (keeps the linear, small-amplitude assumption) */
+  waveCap: number;
   /** heat sources (at most MAX_SOURCES) */
   sources: HeatSource[];
 }
@@ -79,6 +100,27 @@ export interface SimParams {
 /** Number of water rows (cells j < waterRows are water). At least one row. */
 export function waterRows(p: Pick<SimParams, "ny" | "waterLevel">): number {
   return Math.min(p.ny, Math.max(1, Math.round(p.waterLevel * p.ny)));
+}
+
+/** 32-bit integer hash (same arithmetic as the WGSL `hash`), returns a float in [0, 1) */
+export function hash01(x0: number): number {
+  let x = x0 >>> 0;
+  x ^= x >>> 16;
+  x = Math.imul(x, 0x7feb352d) >>> 0;
+  x ^= x >>> 15;
+  x = Math.imul(x, 0x846ca68b) >>> 0;
+  x ^= x >>> 16;
+  return (x >>> 8) / 16777216;
+}
+/** does surface column c burst in step `step`? */
+export function bursts(c: number, step: number, prob: number): boolean {
+  const seed = (Math.imul(c, 9781) + Math.imul(step, 6271) + 17) >>> 0;
+  return hash01(seed) < prob;
+}
+
+/** wave sub-steps per thermal sub-cycle so that c * dt / h <= 0.5 (2D stability limit is 1/sqrt 2) */
+export function waveSubsteps(p: Pick<SimParams, "waveSpeed" | "dt" | "subcycles" | "h">): number {
+  return Math.max(1, Math.ceil((p.waveSpeed * (p.dt / p.subcycles)) / (0.5 * p.h)));
 }
 
 /** Water level used by the app: see README (why 70 %). */
@@ -109,6 +151,12 @@ export function defaultParams(n = 48): SimParams {
     pressureIters: 40,
     sorOmega: 1.6,
     waterLevel: 1,
+    waveSpeed: 0.23,
+    waveDamping: 1.5,
+    waveGain: 40,
+    vaporLift: 0.05,
+    burstProb: 0.15,
+    waveCap: 0.002, // 2 mm: about 2 cells at 48^3, independent of the grid
     sources: [],
   };
 }
@@ -140,6 +188,13 @@ export function packParams(p: SimParams): Float32Array {
   a[15] = p.sorOmega;
   a[16] = Math.min(p.sources.length, MAX_SOURCES);
   a[17] = waterRows(p);
+  a[18] = p.waveSpeed;
+  a[19] = p.waveDamping;
+  a[20] = p.waveGain;
+  a[21] = p.vaporLift;
+  a[22] = p.waveCap;
+  a[23] = waveSubsteps(p);
+  a[24] = p.burstProb;
   for (let s = 0; s < Math.min(p.sources.length, MAX_SOURCES); s++) {
     const src = p.sources[s];
     const o = 32 + s * 8;

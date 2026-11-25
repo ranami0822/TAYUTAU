@@ -11,6 +11,7 @@ export interface RunSimArgs {
   params: SimParams;
   H?: number[];
   vel?: number[];
+  eta?: number[];
   steps: number;
   /** read back after these step counts (default: only at the end) */
   readAt?: number[];
@@ -39,9 +40,10 @@ async function runSim(args: RunSimArgs) {
   const sim = new GpuSolver(eng, args.params);
   if (args.H) sim.H.update(new Float32Array(args.H));
   if (args.vel) sim.vel.update(new Float32Array(args.vel));
+  if (args.eta) sim.eta.update(new Float32Array(args.eta));
   await sim.ready();
   const { nCells, nFaces } = sim.g;
-  const snaps: { step: number; H: number[]; vel: number[]; srcAcc: number[] }[] = [];
+  const snaps: { step: number; H: number[]; vel: number[]; srcAcc: number[]; eta: number[] }[] = [];
   const readAt = args.readAt ?? [args.steps];
   const t0 = performance.now();
   for (let n = 1; n <= args.steps; n++) {
@@ -52,6 +54,7 @@ async function runSim(args: RunSimArgs) {
         H: Array.from(await sim.read(sim.H, nCells)),
         vel: Array.from(await sim.read(sim.vel, nFaces)),
         srcAcc: Array.from(await sim.read(sim.srcAcc, nCells)),
+        eta: Array.from(await sim.read(sim.eta, sim.g.nx * sim.g.nz)),
       });
     }
   }

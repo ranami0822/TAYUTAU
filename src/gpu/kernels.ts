@@ -58,6 +58,13 @@ fn SOR() -> f32 { return P[15]; }
 fn NSRC() -> i32 { return i32(P[16]); }
 /** water rows: cells with j >= ROWS() are air (above the water surface) */
 fn ROWS() -> i32 { return i32(P[17]); }
+fn WSPEED() -> f32 { return P[18]; }
+fn WDAMP() -> f32 { return P[19]; }
+fn WGAIN() -> f32 { return P[20]; }
+fn VLIFT() -> f32 { return P[21]; }
+fn WCAP() -> f32 { return P[22]; }
+fn WSUB() -> f32 { return P[23]; }
+fn BPROB() -> f32 { return P[24]; }
 
 fn ncells() -> i32 { return NX() * NY() * NZ(); }
 fn nU() -> i32 { return (NX() + 1) * NY() * NZ(); }
@@ -520,6 +527,99 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
   parts[o] = pos.x; parts[o + 1] = pos.y; parts[o + 2] = pos.z;
   parts[o + 3] = alive; parts[o + 4] = size; parts[o + 5] = age;
+}`,
+  },
+
+  /** surface waves, flux update (twin of CpuSolver.waveFlux); one thread per surface face */
+  waveFlux: {
+    name: "waveFlux",
+    domain: "faces",
+    bindings: [
+      { name: "Hs", access: "read" },
+      { name: "vin", access: "read" },
+      { name: "eta", access: "read" },
+      { name: "clock", access: "read" },
+      { name: "q", access: "read_write" },
+    ],
+    body: /* wgsl */ `
+fn hashU(x0 : u32) -> u32 {
+  var x = x0;
+  x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
+  return x;
+}
+fn bursts(c : i32) -> bool {
+  let seed = u32(c) * 9781u + u32(clock[0]) * 6271u + 17u;
+  return f32(hashU(seed) >> 8u) / 16777216.0 < BPROB();
+}
+fn surfaceFrozen(i : i32, k : i32) -> bool { return isSolidH(Hs[cidx(i, ROWS() - 1, k)]); }
+fn etaForced(i : i32, k : i32) -> f32 {
+  let j = ROWS() - 1;
+  var w = 0.0;
+  if (j > 0) { w = vin[vIdx(i, j, k)]; }
+  let chi = vaporQuality(Hs[cidx(i, j, k)]);
+  var g = GRAV();
+  if (g == 0.0) { g = 1.0; }
+  var burst = 0.0;
+  if (BPROB() > 0.0 && bursts(i + NX() * k)) { burst = 1.0 / BPROB(); }
+  let e = WGAIN() * w * abs(w) / (2.0 * g) + VLIFT() * chi * burst;
+  return clamp(e, -WCAP(), WCAP());
+}
+fn dE(i : i32, k : i32) -> f32 { return eta[i + NX() * k] - etaForced(i, k); }
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let f = i32(gid.x) + i32(gid.y) * ${WG} * 65535;
+  let nx = NX(); let nz = NZ();
+  let oz = (nx + 1) * nz;
+  if (f >= oz + nx * (nz + 1)) { return; }
+  let dts = DT() / SUBC() / WSUB();
+  let c2 = WSPEED() * WSPEED();
+  let damp = 1.0 / (1.0 + WDAMP() * dts);
+  if (f < oz) {
+    let i = f % (nx + 1); let k = f / (nx + 1);
+    if (i == 0 || i == nx || surfaceFrozen(i - 1, k) || surfaceFrozen(i, k)) { q[f] = 0.0; return; }
+    q[f] = (q[f] - dts * c2 * (dE(i, k) - dE(i - 1, k)) / HH()) * damp;
+  } else {
+    let g = f - oz;
+    let i = g % nx; let k = g / nx;
+    if (k == 0 || k == nz || surfaceFrozen(i, k - 1) || surfaceFrozen(i, k)) { q[f] = 0.0; return; }
+    q[f] = (q[f] - dts * c2 * (dE(i, k) - dE(i, k - 1)) / HH()) * damp;
+  }
+}`,
+  },
+
+  /** surface waves, height update (twin of CpuSolver.waveHeight); one thread per surface column */
+  waveHeight: {
+    name: "waveHeight",
+    domain: "cells",
+    bindings: [
+      { name: "q", access: "read" },
+      { name: "eta", access: "read_write" },
+    ],
+    body: /* wgsl */ `
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let c = i32(gid.x) + i32(gid.y) * ${WG} * 65535;
+  let nx = NX(); let nz = NZ();
+  if (c >= nx * nz) { return; }
+  let i = c % nx; let k = c / nx;
+  let oz = (nx + 1) * nz;
+  let r = DT() / SUBC() / WSUB() / HH();
+  let qx = q[i + 1 + (nx + 1) * k] - q[i + (nx + 1) * k];
+  let qz = q[oz + i + nx * (k + 1)] - q[oz + i + nx * k];
+  eta[c] = eta[c] - r * (qx + qz);
+}`,
+  },
+
+  /** advances the step counter (clock[0]) at the end of a step; one thread */
+  tick: {
+    name: "tick",
+    domain: "cells",
+    bindings: [{ name: "clock", access: "read_write" }],
+    body: /* wgsl */ `
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  // P must be referenced: the automatic bind-group layout drops unused bindings, and binding 0 (P) is always bound
+  if (gid.x == 0u && NX() > 0) { clock[0] = clock[0] + 1.0; }
 }`,
   },
 

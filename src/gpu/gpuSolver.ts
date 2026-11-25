@@ -4,7 +4,7 @@
  */
 import { ComputeShader, Constants, StorageBuffer, type WebGPUEngine } from "@babylonjs/core";
 import { KERNELS, kernelSource, bindingsMapping, dispatchSize, REDUCE_WG, type KernelDef } from "./kernels";
-import { packParams, PARAM_WORDS, waterRows, type SimParams } from "../sim/params";
+import { packParams, PARAM_WORDS, waterRows, waveSubsteps, type SimParams } from "../sim/params";
 import { makeGrid, type Grid } from "../sim/cpuSolver";
 import { enthalpyFromT } from "../sim/water";
 
@@ -38,6 +38,13 @@ export class GpuSolver {
   readonly omega: StorageBuffer;
   readonly srcAcc: StorageBuffer;
   readonly partials: StorageBuffer;
+  /** surface height above the mean water level [m], nx*nz */
+  readonly eta: StorageBuffer;
+  /** surface volume fluxes, (nx+1)*nz x-faces then nx*(nz+1) z-faces */
+  readonly q: StorageBuffer;
+  readonly nQ: number;
+  /** clock[0] = number of steps taken (as f32: exact up to 2^24 steps, ~39 h at 120 steps/s) */
+  readonly clock: StorageBuffer;
   readonly nGroups: number;
   private shaders: Record<string, ComputeShader> = {};
   time = 0;
@@ -60,6 +67,10 @@ export class GpuSolver {
     this.srcAcc = buf(nC, "srcAcc");
     this.nGroups = Math.ceil(nC / REDUCE_WG);
     this.partials = buf(this.nGroups * 8, "partials");
+    this.nQ = (p.nx + 1) * p.nz + p.nx * (p.nz + 1);
+    this.eta = buf(p.nx * p.nz, "eta");
+    this.q = buf(this.nQ, "waveFlux");
+    this.clock = buf(4, "clock");
     this.setParams(p);
     this.H.update(new Float32Array(nC).fill(enthalpyFromT(initialT)));
     this.reset(initialT);
@@ -81,6 +92,9 @@ export class GpuSolver {
     this.make(KERNELS.divergence, { vin: this.vel2, div: this.div });
     this.make(KERNELS.pressureRed, B);
     this.make(KERNELS.pressureBlack, B);
+    this.make(KERNELS.waveFlux, { Hs: this.H, vin: this.vel, eta: this.eta, clock: this.clock, q: this.q });
+    this.make(KERNELS.tick, { clock: this.clock });
+    this.make(KERNELS.waveHeight, { q: this.q, eta: this.eta });
     this.make(KERNELS.reduce, { Hs: this.H, srcAcc: this.srcAcc, partials: this.partials });
     this.make(KERNELS.project, { vin: this.vel2, phi: this.phi, Hs: this.H, vout: this.vel });
   }
@@ -123,6 +137,9 @@ export class GpuSolver {
     this.H.update(new Float32Array(nC).fill(enthalpyFromT(initialT)));
     for (const b of [this.Htmp, this.phi, this.div, this.srcAcc]) b.update(new Float32Array(nC));
     this.omega.update(new Float32Array(nC * 4));
+    this.eta?.update(new Float32Array(this.g.nx * this.g.nz));
+    this.q?.update(new Float32Array(this.nQ));
+    this.clock?.update(new Float32Array(4));
     this.vel.update(new Float32Array(this.g.nFaces));
     this.vel2.update(new Float32Array(this.g.nFaces));
     this.time = 0;
@@ -138,6 +155,11 @@ export class GpuSolver {
     for (let s = 0; s < this.p.subcycles; s++) {
       this.dispatch("thermal", nCells);
       this.dispatch("advectScalar", nCells);
+      const ws = waveSubsteps(this.p);
+      for (let w = 0; w < ws; w++) {
+        this.dispatch("waveFlux", this.nQ);
+        this.dispatch("waveHeight", this.g.nx * this.g.nz);
+      }
     }
     this.dispatch("advectVel", nFaces);
     if (this.p.vortEps > 0) {
@@ -150,6 +172,7 @@ export class GpuSolver {
       this.dispatch("pressureBlack", nCells);
     }
     this.dispatch("project", nFaces);
+    if (!this.shaders.tick.dispatch(1, 1, 1)) throw new Error("dispatch failed: tick");
     this.time += this.p.dt;
   }
 
@@ -186,6 +209,6 @@ export class GpuSolver {
   }
 
   dispose() {
-    for (const b of [this.P, this.H, this.Htmp, this.vel, this.vel2, this.phi, this.div, this.omega, this.srcAcc, this.partials]) b.dispose();
+    for (const b of [this.P, this.H, this.Htmp, this.vel, this.vel2, this.phi, this.div, this.omega, this.srcAcc, this.partials, this.eta, this.q, this.clock]) b.dispose();
   }
 }

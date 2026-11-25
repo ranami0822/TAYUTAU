@@ -74,7 +74,7 @@ export async function startApp(engine: WebGPUEngine, canvas: HTMLCanvasElement):
   camera.attachControl(canvas, true);
 
   const sim = new GpuSolver(engine, params);
-  const volume = new VolumeRenderer(scene, params, sim.H, sim.P);
+  const volume = new VolumeRenderer(scene, params, sim.H, sim.P, sim.eta);
   const bubbles = new BubbleRenderer(scene, sim, volume);
 
   // tank outline and a floor for orientation

@@ -20,7 +20,7 @@
  *   pressure:    red-black SOR on phi (warm-started)
  *   project:     vel = vel2 - grad phi (open faces only), clamp
  */
-import { type SimParams, MAX_SOURCES, waterRows } from "./params";
+import { type SimParams, MAX_SOURCES, waterRows, waveSubsteps, bursts } from "./params";
 import {
   temperature,
   enthalpyFromT,
@@ -82,7 +82,13 @@ export class CpuSolver {
   omega: Float32Array; // 4 per cell: wx, wy, wz, |w|
   /** accumulated enthalpy added by heat sources per cell [J/kg] (exact energy bookkeeping) */
   srcAcc: Float32Array;
+  /** surface height above the mean level [m], nx*nz (index i + nx*k) */
+  eta: Float32Array;
+  /** surface volume flux per unit width [m^2/s]: x faces (nx+1)*nz then z faces nx*(nz+1) */
+  q: Float32Array;
   time = 0;
+  /** steps taken (drives the intermittent bubble bursts; mirrored by the GPU clock buffer) */
+  stepCount = 0;
 
   constructor(p: SimParams, initialT = 20) {
     this.p = p;
@@ -96,6 +102,8 @@ export class CpuSolver {
     this.div = new Float32Array(n);
     this.omega = new Float32Array(n * 4);
     this.srcAcc = new Float32Array(n);
+    this.eta = new Float32Array(p.nx * p.nz);
+    this.q = new Float32Array((p.nx + 1) * p.nz + p.nx * (p.nz + 1));
   }
 
   idx(i: number, j: number, k: number) {
@@ -132,6 +140,11 @@ export class CpuSolver {
     for (let s = 0; s < p.subcycles; s++) {
       this.thermal(dts);
       this.advectScalar(this.Htmp, this.H, dts);
+      const ws = waveSubsteps(p);
+      for (let w = 0; w < ws; w++) {
+        this.waveFlux(dts / ws);
+        this.waveHeight(dts / ws);
+      }
     }
     this.advectVel();
     this.curl();
@@ -140,6 +153,7 @@ export class CpuSolver {
     this.pressure();
     this.project();
     this.time += p.dt;
+    this.stepCount++;
   }
 
   // ---------------------------------------------------------------- thermal
@@ -223,6 +237,65 @@ export class CpuSolver {
           out[c] = Hc + dSrc + dCond + dDrift;
           this.srcAcc[c] += dSrc;
         }
+  }
+
+  // ---------------------------------------------------------------- surface waves
+  /** surface column (i,k) is frozen (top water cell is ice): no waves there */
+  surfaceFrozen(i: number, k: number) {
+    return isSolid(this.H[this.idx(i, this.rows - 1, k)]);
+  }
+  /** height the flow below pushes the surface to [m]: dynamic head of the up-flow + bursting vapour, capped */
+  etaForced(i: number, k: number) {
+    const p = this.p;
+    const j = this.rows - 1;
+    const w = j > 0 ? this.vel[this.vIdx(i, j, k)] : 0; // vertical velocity just under the top water cell
+    const chi = vaporQuality(this.H[this.idx(i, j, k)]);
+    const burst = p.burstProb > 0 && bursts(i + this.g.nx * k, this.stepCount, p.burstProb) ? 1 / p.burstProb : 0;
+    const e = (p.waveGain * w * Math.abs(w)) / (2 * p.g || 1) + p.vaporLift * chi * burst;
+    return Math.min(p.waveCap, Math.max(-p.waveCap, e));
+  }
+  /** dq/dt = -c^2 grad(eta - etaForced) - gamma q on interior surface faces; closed walls and ice: q = 0 */
+  waveFlux(dts: number) {
+    const { nx, nz } = this.g;
+    const p = this.p;
+    const c2 = p.waveSpeed * p.waveSpeed;
+    const damp = 1 / (1 + p.waveDamping * dts); // implicit damping (unconditionally stable)
+    const oz = (nx + 1) * nz;
+    const d = (i: number, k: number) => this.eta[i + nx * k] - this.etaForced(i, k);
+    for (let k = 0; k < nz; k++)
+      for (let i = 0; i <= nx; i++) {
+        const f = i + (nx + 1) * k;
+        if (i === 0 || i === nx || this.surfaceFrozen(i - 1, k) || this.surfaceFrozen(i, k)) { this.q[f] = 0; continue; }
+        this.q[f] = (this.q[f] - (dts * c2 * (d(i, k) - d(i - 1, k))) / p.h) * damp;
+      }
+    for (let k = 0; k <= nz; k++)
+      for (let i = 0; i < nx; i++) {
+        const f = oz + i + nx * k;
+        if (k === 0 || k === nz || this.surfaceFrozen(i, k - 1) || this.surfaceFrozen(i, k)) { this.q[f] = 0; continue; }
+        this.q[f] = (this.q[f] - (dts * c2 * (d(i, k) - d(i, k - 1))) / p.h) * damp;
+      }
+  }
+  /** d eta/dt = -div q (flux form: the sum of eta, i.e. the water volume, is conserved exactly) */
+  waveHeight(dts: number) {
+    const { nx, nz } = this.g;
+    const oz = (nx + 1) * nz;
+    const r = dts / this.p.h;
+    for (let k = 0; k < nz; k++)
+      for (let i = 0; i < nx; i++) {
+        const qx = this.q[i + 1 + (nx + 1) * k] - this.q[i + (nx + 1) * k];
+        const qz = this.q[oz + i + nx * (k + 1)] - this.q[oz + i + nx * k];
+        this.eta[i + nx * k] -= r * (qx + qz);
+      }
+  }
+  /** water volume [m^3]: fixed water rows + surface displacement */
+  waterVolume() {
+    let s = 0;
+    for (const e of this.eta) s += e;
+    return this.waterCells() * this.p.h ** 3 + s * this.p.h * this.p.h;
+  }
+  /** air volume [m^3]: the rest of the closed tank */
+  airVolume() {
+    return this.g.nCells * this.p.h ** 3 - this.waterVolume();
   }
 
   // ---------------------------------------------------------------- scalar advection

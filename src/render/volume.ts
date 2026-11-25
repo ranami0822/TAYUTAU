@@ -38,6 +38,7 @@ uniform lightDir : vec3f;
 varying vWorld : vec3f;
 var<storage, read> Hs : array<f32>;
 var<storage, read> P : array<f32>;
+var<storage, read> eta : array<f32>;
 
 const C_WATER : f32 = ${f(W.C_WATER)};
 const C_ICE : f32 = ${f(W.C_ICE)};
@@ -86,18 +87,34 @@ fn tempColor(T : f32) -> vec3f {
   return mix(vec3f(1.0, 0.2, 0.08), vec3f(1.0, 0.95, 0.9), clamp((T - 100.0) / 200.0, 0.0, 1.0));
 }
 
-/** water surface (flat, normal +y): Fresnel reflection of a simple sky, sun highlight and a faint tint.
+/** surface height (metres above the mean level), bilinear between column centres; g = grid coords x,z */
+fn etaAt(gx : f32, gz : f32) -> f32 {
+  let nx = i32(uniforms.dims.x); let nz = i32(uniforms.dims.z);
+  let sx = clamp(gx - 0.5, 0.0, f32(nx - 1)); let sz = clamp(gz - 0.5, 0.0, f32(nz - 1));
+  let i0 = min(i32(floor(sx)), max(nx - 2, 0)); let k0 = min(i32(floor(sz)), max(nz - 2, 0));
+  let i1 = min(i0 + 1, nx - 1); let k1 = min(k0 + 1, nz - 1);
+  let fx = sx - f32(i0); let fz = sz - f32(k0);
+  let a = mix(eta[i0 + nx * k0], eta[i1 + nx * k0], fx);
+  let b = mix(eta[i0 + nx * k1], eta[i1 + nx * k1], fx);
+  return mix(a, b, fz);
+}
+
+/** water surface (normal nUp): Fresnel reflection of a simple sky, sun highlight and a faint tint.
     Returns premultiplied colour and alpha. */
-fn surfaceColor(rd : vec3f, fromAbove : bool) -> vec4f {
-  var n = vec3f(0.0, 1.0, 0.0);
-  if (!fromAbove) { n = vec3f(0.0, -1.0, 0.0); }
+fn surfaceColor(rd : vec3f, nUp : vec3f, fromAbove : bool) -> vec4f {
+  var n = nUp;
+  if (!fromAbove) { n = -nUp; }
   let cosi = max(dot(n, -rd), 0.0);
   var F = 0.02 + 0.98 * pow(1.0 - cosi, 5.0);
   if (!fromAbove && cosi < 0.661) { F = 1.0; } // critical angle of water (n = 1.333)
   let r = reflect(rd, n);
-  let sky = mix(vec3f(0.08, 0.11, 0.16), vec3f(0.55, 0.68, 0.85), clamp(r.y * 0.5 + 0.5, 0.0, 1.0));
+  // sky: dark horizon, bright zenith and a soft light band along the light direction, so tilted
+  // facets of the waves reflect visibly different brightness
+  let L = normalize(uniforms.lightDir);
+  var sky = mix(vec3f(0.08, 0.11, 0.16), vec3f(0.55, 0.68, 0.85), clamp(r.y * 0.5 + 0.5, 0.0, 1.0));
+  sky += vec3f(0.5, 0.55, 0.6) * pow(max(dot(normalize(vec3f(r.x, 0.0, r.z) + vec3f(1e-5)), normalize(vec3f(L.x, 0.0, L.z))), 0.0), 8.0) * clamp(r.y * 2.0, 0.0, 1.0);
   var sun = 0.0;
-  if (fromAbove) { sun = pow(max(dot(r, normalize(uniforms.lightDir)), 0.0), 160.0); }
+  if (fromAbove) { sun = pow(max(dot(r, L), 0.0), 60.0) * 0.8; }
   let tint = vec3f(0.45, 0.7, 0.9);
   let a = clamp(0.2 + 0.8 * F + sun, 0.0, 1.0);
   let c = sky * F * 0.9 + vec3f(1.0) * sun + tint * 0.2;
@@ -148,18 +165,32 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
   let toGrid = uniforms.dims / size;
   let cellW = size.x / uniforms.dims.x;
 
-  // water surface: the plane at the top of the water rows (P[17]); above it is air (fully transparent)
-  let ys = uniforms.boxMin.y + P[17] * (size.y / uniforms.dims.y);
+  // water surface: height field ys0 + eta(x, z) on top of the water rows (P[17]); above it is air
+  let ys0 = uniforms.boxMin.y + P[17] * (size.y / uniforms.dims.y);
   var wA = tNear;
   var wB = tFar;
   var tSurf = -1.0;
+  var nSurf = vec3f(0.0, 1.0, 0.0);
   if (abs(rd.y) > 1e-7) {
-    let tp = (ys - ro.y) / rd.y;
+    // intersect the plane, then refine on the height field by fixed-point iteration (small slopes)
+    var tp = (ys0 - ro.y) / rd.y;
+    for (var it = 0; it < 4; it++) {
+      let q = (ro + rd * tp - uniforms.boxMin) * toGrid;
+      tp = (ys0 + etaAt(q.x, q.z) * uniforms.metersToWorld - ro.y) / rd.y;
+    }
     if (rd.y < 0.0) { wA = max(wA, tp); } else { wB = min(wB, tp); }
-    if (tp > tNear && tp < tBox && tp < srcT) { tSurf = tp; }
-  } else if (ro.y >= ys) { wB = wA; }
+    if (tp > tNear && tp < tBox && tp < srcT) {
+      tSurf = tp;
+      let q = (ro + rd * tp - uniforms.boxMin) * toGrid;
+      let s = uniforms.metersToWorld / cellW; // eta metres -> grid cells
+      let dx = (etaAt(q.x + 0.5, q.z) - etaAt(q.x - 0.5, q.z)) * s;
+      let dz = (etaAt(q.x, q.z + 0.5) - etaAt(q.x, q.z - 0.5)) * s;
+      // display-only exaggeration of the slopes (x3) so millimetre ripples read on screen
+      nSurf = normalize(vec3f(-3.0 * dx, 1.0, -3.0 * dz));
+    }
+  } else if (ro.y >= ys0) { wB = wA; }
   if (rd.y < 0.0 && tSurf > 0.0) {
-    let sc = surfaceColor(rd, true);
+    let sc = surfaceColor(rd, nSurf, true);
     col += (1.0 - alpha) * sc.rgb;
     alpha += (1.0 - alpha) * sc.a;
   }
@@ -233,7 +264,7 @@ fn main(input : FragmentInputs) -> FragmentOutputs {
 
   if (!hitIce && rd.y > 0.0 && tSurf > 0.0 && alpha < 0.99) {
     // the surface seen from below (total internal reflection beyond the critical angle)
-    let sc = surfaceColor(rd, false);
+    let sc = surfaceColor(rd, nSurf, false);
     col += (1.0 - alpha) * sc.rgb;
     alpha += (1.0 - alpha) * sc.a;
   }
@@ -273,7 +304,7 @@ export class VolumeRenderer {
   viewMode = 0;
   selected = -1;
 
-  constructor(scene: Scene, p: SimParams, H: StorageBuffer, P: StorageBuffer) {
+  constructor(scene: Scene, p: SimParams, H: StorageBuffer, P: StorageBuffer, eta: StorageBuffer) {
     const maxN = Math.max(p.nx, p.ny, p.nz);
     this.metersToWorld = 1 / (maxN * p.h);
     const ext = new Vector3(p.nx / maxN, p.ny / maxN, p.nz / maxN);
@@ -288,7 +319,7 @@ export class VolumeRenderer {
       {
         attributes: ["position"],
         uniforms: ["world", "worldViewProjection", "camPos", "boxMin", "boxMax", "dims", "metersToWorld", "viewMode", "selected", "lightDir"],
-        storageBuffers: ["Hs", "P"],
+        storageBuffers: ["Hs", "P", "eta"],
         shaderLanguage: ShaderLanguage.WGSL,
         needAlphaBlending: true,
       },
@@ -300,6 +331,7 @@ export class VolumeRenderer {
     m.disableDepthWrite = true;
     m.setStorageBuffer("Hs", H);
     m.setStorageBuffer("P", P);
+    m.setStorageBuffer("eta", eta);
     m.setVector3("boxMin", this.boxMin);
     m.setVector3("boxMax", this.boxMax);
     m.setVector3("dims", new Vector3(p.nx, p.ny, p.nz));

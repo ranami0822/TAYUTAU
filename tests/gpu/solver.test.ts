@@ -17,7 +17,7 @@ afterAll(async () => {
   await H?.close();
 });
 
-type Snap = { step: number; H: number[]; vel: number[]; srcAcc: number[] };
+type Snap = { step: number; H: number[]; vel: number[]; srcAcc: number[]; eta: number[] };
 async function gpu(args: RunSimArgs) {
   return (await H.page.evaluate((a) => window.tayutau.runSim(a), args)) as { snaps: Snap[]; ms: number };
 }
@@ -118,5 +118,24 @@ describe("water surface on the GPU", () => {
     const inj = snap.srcAcc.reduce((a, b) => a + b, 0) * m;
     expect(Math.abs(inj)).toBeGreaterThan(1);
     expect(Math.abs(water(snap.H) - E0 - inj) / E0).toBeLessThan(1e-5);
+  });
+});
+
+describe("surface waves on the GPU", () => {
+  it("match the CPU reference and conserve the water volume", async () => {
+    const n = 12;
+    const L = n * defaultParams(n).h;
+    const { p, s, H0, vel0 } = setup(n, { waterLevel: 0.7, sources: [{ x: L / 2, y: L * 0.2, z: L / 2, r: L * 0.2, T: 400 }] }, 31);
+    const eta0 = Array.from({ length: n * n }, (_, c) => 0.5 * p.h * Math.sin((c % n) * 0.7) * Math.cos(Math.floor(c / n) * 0.5));
+    const mean = eta0.reduce((a, b) => a + b, 0) / eta0.length;
+    for (let c = 0; c < eta0.length; c++) eta0[c] -= mean;
+    s.eta.set(eta0);
+    const g = await gpu({ params: p, H: H0, vel: vel0, eta: Array.from(s.eta), steps: 5 });
+    for (let k = 0; k < 5; k++) s.step();
+    const e = g.snaps[0].eta;
+    expect(maxAbsDiff(e, s.eta)).toBeLessThan(1e-3 * p.h);
+    expect(maxAbsDiff(e, eta0)).toBeGreaterThan(1e-3 * p.h); // it moved
+    const sum0 = eta0.reduce((a, b) => a + b, 0);
+    expect(Math.abs(e.reduce((a, b) => a + b, 0) - sum0)).toBeLessThan(1e-6 * p.h * e.length);
   });
 });
